@@ -379,6 +379,8 @@ int32_t *runtime_errno(void) { return &guest_errno; }
 #define WAIT_STATS_THREADS 256
 static void *wait_stats_monitor(void *argument) {
     (void)argument;
+    const char *active_flag=getenv("TLG_WAIT_ACTIVE");
+    const int show_active_waits=active_flag && active_flag[0]=='1';
     static RuntimeThreadInfo infos[WAIT_STATS_THREADS];
     for (;;) {
 #ifdef _WIN32
@@ -403,6 +405,28 @@ static void *wait_stats_monitor(void *argument) {
                    w->wait_max_kind ? w->wait_max_kind : "wait");
             if (w->wait_max_name[0]) printf(" '%s'",w->wait_max_name);
             printf(" (%llu ms ago)\n",(unsigned long long)(now>=w->wait_max_end_ms ? now-w->wait_max_end_ms : 0));
+        }
+        /* Completed-wait statistics alone are silent for permanently blocked threads.
+         * This additional snapshot is observational and explicitly opt-in. */
+        if (show_active_waits) {
+            unsigned active=0;
+            for (size_t i=0;i<count;++i) {
+                const RuntimeWait *w=&infos[i].wait;
+                if (infos[i].finished || !w->depth || !w->level[0].kind) continue;
+                const RuntimeWaitLevel *level=&w->level[0];
+                const uint64_t blocked=now>=level->since_ms ? now-level->since_ms : 0;
+                if (blocked<1000) continue;
+                if (!active++) printf("Runtime: active waits (TLG_WAIT_ACTIVE, >=1000 ms)\n");
+                printf("  active %s (tid %llu): %llu ms in '%s' object=%p",
+                       infos[i].record ? infos[i].name : "host thread",
+                       (unsigned long long)infos[i].os_tid,
+                       (unsigned long long)blocked,level->kind,level->object);
+                if (level->name[0]) printf(" name='%s'",level->name);
+                printf(" frame=0x%llx\n",(unsigned long long)level->frame);
+            }
+            runtime_sema_report_pending();
+            if (active) printed=1;
+            fflush(stdout);
         }
         if (printed) fflush(stdout);
     }
