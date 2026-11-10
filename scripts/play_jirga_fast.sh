@@ -52,7 +52,7 @@ if [[ "$show" == true ]]; then
          "$mode" "$provider" "$preset" "$jitter" "$workers"
   exit 0
 fi
-shift || true
+if (( $# > 0 )); then shift; fi
 if [[ ! -x $root/port/out/tlg-probe ]]; then
   printf 'Working game binary missing: %s\n' "$root/port/out/tlg-probe" >&2
   exit 1
@@ -60,7 +60,8 @@ fi
 printf 'GR2 Jirga trial: %s (FSR provider %s, preset %s, jitter %s, prep workers %s)\n' \
        "$mode" "$provider" "$preset" "$jitter" "$workers"
 printf 'Compare in the SAME crowded scene; the original game files and launcher settings are unchanged.\n'
-exec env TLG_GPU_PROFILE=0 TLG_WAIT_ACTIVE=0 TLG_WAIT_STATS=0 \
+exec env -u TLG_GPU_PROFILE -u TLG_WAIT_ACTIVE -u TLG_WAIT_STATS \
+    -u TLG_TRACE_SEMA \
     TLG_UPSCALER="$provider" TLG_UPSCALE_PRESET="$preset" \
     TLG_JITTER="$jitter" TLG_PREP_WORKERS="$workers" \
     TLG_FRAME_STATS=1 bash "$root/run_gr2.sh" "$@"
