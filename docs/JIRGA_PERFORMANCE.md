@@ -14,6 +14,57 @@ workers (TLG_PREP_WORKERS). We use these rather than making speculative
 GPU changes. GPU timestamps are *not* enabled in the baseline because
 they impose measurement overhead.
 
+## Measured Fedora/RADV results — November 10, 2026
+
+The first user captures were baseline (8 draw-preparation workers), prep4,
+then gpu-profile, from the same Ryzen 7 7735U / Radeon 680M / 16 GiB host.
+
+**Baseline:** the renderer went from ~12–15 draws/frame around 30 FPS
+to 4,759–4,780 draws/frame at **4.9–4.7 FPS**.
+Among 31 heavy (>1,000 draws) stall samples, median GPU ticks were
+**186.5 ms** and median GPU-thread CPU time **18.5 ms**. The slow
+5-second windows reported **zero shader/pipeline compiles**.
+
+**prep4:** one heavy 5-second window had **4,930 draws/frame at 17.6 FPS**,
+and another 2,536 draws/frame at 22.0 FPS. In 29 heavy stall samples,
+median GPU ticks were **34.2 ms** and GPU-thread CPU time **16.4 ms**.
+This is promising for thread contention, but **not** a paired
+same-camera A/B result; no general FPS improvement has been proven.
+
+**GPU profile failed before useful measurements.** With
+TLG_GPU_PROFILE=1 the game displayed only 18 guest flips, then emitted
+FREEZE: no frame for 10 s. The DrawThread awaited GPU idle and the
+GPU-command thread was inside DrawPipe::Drain. GPU-pass samples were not
+produced. This may be a profiling/draw-pipeline interaction; the cause
+has not been proven. Avoid the original gpu-profile mode for now.
+
+**Measurement bug corrected:** baseline had 10 recorded FPS windows,
+prep4 had 6, but the initial parser discarded all except 1 or 0
+respectively because it always excluded the first 45 seconds.
+The updated script preserves raw windows, falls back when all are
+excluded, and separately reports heavy draw windows and GPU tick stalls.
+
+### Revised, scene-focused test
+
+Start in the same Jirga Para Lhao location with a fixed camera and warm
+shader cache. Run each profile until several heavy (>1,000 draw)
+windows have been captured; a repeat under the same view matters more
+than a nominal runtime. A 0-second excluded warm-up prevents losing
+the useful early windows in a short session:
+
+    python3 scripts/jirga_perf.py run baseline --seconds 100 --warmup 0
+    python3 scripts/jirga_perf.py run prep4 --seconds 100 --warmup 0
+
+For a separate diagnostic experiment (not FPS A/B), the newly added
+gpu-profile-nopipe mode sets TLG_DRAW_PIPE=0 along with
+TLG_GPU_PROFILE=1. It is **unvalidated** on the laptop and changes host
+scheduling; it may still freeze. Try it only after the normal A/B:
+
+    python3 scripts/jirga_perf.py run gpu-profile-nopipe --seconds 100 --warmup 0
+
+Do not confuse the no-pipe profiling timings with ordinary gameplay FPS.
+Preserve any FREEZE report if the profiler still stalls.
+
 ## Procedure
 
 From the repository root, after fetching the performance branch, make
@@ -39,10 +90,7 @@ rather than assume**. If needed also compare:
 
     python3 scripts/jirga_perf.py run prep2 --seconds 150
 
-For **diagnosis only** (not directly comparable to baseline due to
-timestamp overhead), get the actual GPU pass breakdown:
-
-    python3 scripts/jirga_perf.py run gpu-profile --seconds 150
+**Known issue:** the original gpu-profile mode froze before rendering gameplay on Radeon 680M. Do not use it as a performance baseline. An unvalidated no-pipe alternative is described above.
 
 For a CPU submission-path experiment, the opt-in
 drawpipe-off variant disables the draw-recording pipeline and may hurt
