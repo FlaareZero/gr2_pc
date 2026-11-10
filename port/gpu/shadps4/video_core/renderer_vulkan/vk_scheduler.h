@@ -726,6 +726,13 @@ public:
         return dynamic_state;
     }
 
+    // Recorder-thread-only: deduplicate identical Vulkan graphics and index bindings
+    // within the same primary command buffer. Both are still emitted when the
+    // command buffer changes or host rendering takes the raw command buffer.
+    void BindGraphicsPipeline(vk::CommandBuffer cmdbuf, vk::Pipeline pipeline);
+    void BindIndexBuffer(vk::CommandBuffer cmdbuf, vk::Buffer buffer, vk::DeviceSize offset,
+                         vk::IndexType type);
+
     /// Returns the current command buffer for recording on the calling thread. With threaded
     /// recording this first waits until all commands passed to Record() are recorded, then
     /// records directly (Record() included, so callers may mix both) until the next
@@ -738,6 +745,7 @@ public:
             direct_recordings.fetch_add(1, std::memory_order_relaxed);
             TraceDirectRecording(__builtin_return_address(0));
         }
+        InvalidateDrawBindings();
         return current_cmdbuf;
     }
 
@@ -926,6 +934,24 @@ private:
     CommandPool command_pool;
     DynamicState dynamic_state;
     SubmitFunc on_submit{};
+    // These fields are only accessed on the recorder path or after SyncRecording().
+    // A submission, or direct raw command buffer access, invalidates the memo.
+    void InvalidateDrawBindings() noexcept {
+        last_graphics_pipeline = {};
+        index_binding_valid = false;
+    }
+    vk::Pipeline last_graphics_pipeline{};
+    vk::Buffer last_index_buffer{};
+    vk::DeviceSize last_index_offset{};
+    vk::IndexType last_index_type{};
+    bool index_binding_valid = false;
+    bool draw_bind_memo_enabled = false;
+    bool draw_bind_stats_enabled = false;
+    u64 draw_pipeline_binds = 0;
+    u64 draw_pipeline_skips = 0;
+    u64 draw_index_binds = 0;
+    u64 draw_index_skips = 0;
+    std::chrono::steady_clock::time_point last_draw_bind_report{};
     vk::CommandBuffer current_cmdbuf;
     std::condition_variable_any event_cv;
     struct PendingOp {
