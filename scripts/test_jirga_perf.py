@@ -49,6 +49,33 @@ class PerfTests(unittest.TestCase):
         self.assertEqual(data["window_count"], 0)
         self.assertIsNone(data["gpu_ms_per_frame"])
 
+    def test_short_run_not_erased_by_warmup(self):
+        log = ("Frame stats: 20 FPS, worst frame 60 ms; 1500 draws/frame\n"
+               "Frame pacing: median 50 ms, stddev 8 ms, p99 66 ms\n")
+        data = mod.analyze(log, skip_windows=9)
+        self.assertTrue(data["warmup_fallback_to_all_windows"])
+        self.assertEqual(data["post_warmup_windows"], 0)
+        self.assertEqual(data["window_count"], 1)
+        self.assertEqual(data["heavy_window_count"], 1)
+        self.assertEqual(data["heavy_fps_windows"]["median"], 20.0)
+
+    def test_gpu_ticks_heavy_stall(self):
+        log = ("Stall: 200.0 ms frame; waits: readback 0.0 ms, GPU ticks 186.8 ms, "
+               "recorder 0.1 ms, host copies 0.5 ms; 0 compiles 0.0 ms; GC 0.0 ms\n"
+               "       fault handlers: 2 read faults 363.1 ms, write faults 0.3 ms\n"
+               "       GPU thread on CPU 18.4 ms; 0 images registered, 0.0 MB image uploads, 1.3 MB buffer uploads\n"
+               "       4771 draws, 95 dispatches, 2 submissions; GPU thread user 9.4 ms, kernel 9.2 ms\n")
+        data = mod.analyze(log, skip_windows=9)
+        self.assertEqual(data["heavy_stall_count"], 1)
+        self.assertEqual(data["heavy_gpu_ticks_ms"]["median"], 186.8)
+        self.assertEqual(data["heavy_gpu_cpu_ms"]["median"], 18.4)
+
+    def test_profile_freeze_report(self):
+        data = mod.analyze("GPU profile: on (timestamp period 10.00 ns)\n"
+                           "FREEZE: no frame for 10 s; threads:\n")
+        self.assertTrue(data["freeze_reported"])
+        self.assertEqual(data["gpu_profile_windows"], 0)
+
     def test_profiles_have_no_persistent_settings(self):
         self.assertEqual(mod.PROFILES["baseline"], {})
         self.assertEqual(mod.PROFILES["prep4"]["TLG_PREP_WORKERS"], "4")
