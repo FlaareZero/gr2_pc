@@ -1957,10 +1957,29 @@ void Rasterizer::ResetBindings(bool is_compute) {
     for (auto& image_id : bound_images) {
         texture_cache.GetImage(image_id).binding = {};
     }
+    // The original code marked every graphics buffer access as ALL_GRAPHICS,
+    // even fixed-function index/vertex fetches. This widens subsequent WAR
+    // execution dependencies and can stall unrelated stages of the GPU.
+    // Only narrow access types with an unambiguous Vulkan pipeline stage;
+    // shader buffers retain the conservative original stage mask.
+    // TLG_PRECISE_BUFFER_STAGES=0 restores the exact old masks for A/B.
+    static const bool precise_stages = [] {
+        const char* env = std::getenv("TLG_PRECISE_BUFFER_STAGES");
+        return !(env && env[0] == '0');
+    }();
     for (const auto [buffer, offset, size, src_access] : bound_buffers) {
-        const auto dst_stage = is_compute ? vk::PipelineStageFlagBits2::eComputeShader
-                                          : vk::PipelineStageFlagBits2::eAllGraphics;
-        runtime.AccessBuffer(buffer, offset, size, dst_stage, src_access);
+        vk::PipelineStageFlags2 stage = is_compute ? vk::PipelineStageFlagBits2::eComputeShader
+                                                   : vk::PipelineStageFlagBits2::eAllGraphics;
+        if (precise_stages) {
+            if (src_access == vk::AccessFlagBits2::eIndexRead) {
+                stage = vk::PipelineStageFlagBits2::eIndexInput;
+            } else if (src_access == vk::AccessFlagBits2::eVertexAttributeRead) {
+                stage = vk::PipelineStageFlagBits2::eVertexAttributeInput;
+            } else if (src_access == vk::AccessFlagBits2::eIndirectCommandRead) {
+                stage = vk::PipelineStageFlagBits2::eDrawIndirect;
+            }
+        }
+        runtime.AccessBuffer(buffer, offset, size, stage, src_access);
     }
     bound_images.clear();
     bound_buffers.clear();
