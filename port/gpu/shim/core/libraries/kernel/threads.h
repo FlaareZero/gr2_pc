@@ -66,7 +66,9 @@ public:
     // This waits only for the callback body; the owner still performs Stop().
     void WaitForFinished() const {
         const auto done = finished;
-        if (!done || thread.get_id() == std::this_thread::get_id()) {
+        // Do not read the jthread object here: Source::Stop may concurrently
+        // detach it on Linux. This method is only for waiting on OTHER workers.
+        if (!done) {
             return;
         }
         while (!done->load(std::memory_order_acquire)) {
