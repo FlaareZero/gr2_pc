@@ -181,6 +181,27 @@ unsigned runtime_sema_waiters(uint32_t id) {
     pthread_mutex_unlock(&lock);
     return n;
 }
+/* Opt-in diagnostics: queued waits are read under the existing registry mutex.
+ * No tokens, wakeups or guest-visible state change. Bound console output to
+ * 32 semaphore objects per five-second sample. */
+void runtime_sema_report_pending(void) {
+    pthread_mutex_lock(&lock);
+    unsigned pending=0, shown=0;
+    for (Sema *s=registry;s;s=s->next) {
+        unsigned queued=0;
+        for (Waiter *w=s->first;w;w=w->next) ++queued;
+        if (!queued) continue;
+        if (!pending) printf("Runtime: pending semaphores (TLG_WAIT_ACTIVE)\n");
+        ++pending;
+        if (shown<32) {
+            printf("  pending id=%u name='%s' attr=%u count=%d max=%d waiters=%u head_need=%d\n",
+                   s->id,s->name,s->attr,s->count,s->maximum,queued,s->first->need);
+            ++shown;
+        }
+    }
+    if (pending>shown) printf("  ... %u more pending semaphores\n",pending-shown);
+    pthread_mutex_unlock(&lock);
+}
 uintptr_t runtime_sema_resolve(const char *name) {
     if (!strcmp(name,"188x57JYp0g#libkernel")) return (uintptr_t)sem_create;
     if (!strcmp(name,"Zxa0VhQVTsk#libkernel")) return (uintptr_t)sem_wait;

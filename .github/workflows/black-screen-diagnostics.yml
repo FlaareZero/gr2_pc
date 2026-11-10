@@ -1,0 +1,20 @@
+name: Black-screen diagnostics tests
+on:
+  push:
+    branches: [fix/black-screen-f58-f59]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify shell syntax
+        run: bash -n port/tools/build_stock_probe.sh
+      - name: Verify Python syntax
+        run: python3 -m py_compile port/tools/gr2_ab_compare.py port/tests/test_gr2_ab_compare.py
+      - name: Run offline unit tests
+        run: python3 -m unittest discover -s port/tests -p test_gr2_ab_compare.py -v
