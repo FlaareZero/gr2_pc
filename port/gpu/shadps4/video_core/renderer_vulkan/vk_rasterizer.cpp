@@ -1176,6 +1176,7 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
 
     const vk::Pipeline handle = pipeline->Handle();
     const vk::Pipeline square = SquarePass(*pipeline);
+    Scheduler* const gpu_scheduler = &scheduler;
     // Copy the resolved index binding: a later draw may overwrite index_bind
     // before this deferred closure is executed on the recording thread.
     const auto resolved_index = index_bind;
@@ -1185,8 +1186,8 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     const u32 first_instance = instance_offset;
     scheduler.Record([=](vk::CommandBuffer cmdbuf) {
         if (fused_draw_binds && is_indexed) {
-            cmdbuf.bindIndexBuffer(resolved_index.handle, resolved_index.offset,
-                                   resolved_index.type);
+            gpu_scheduler->BindIndexBuffer(cmdbuf, resolved_index.handle, resolved_index.offset,
+                                           resolved_index.type);
         }
         const auto draw = [&] {
             if (is_indexed) {
@@ -1196,10 +1197,10 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
                 cmdbuf.draw(num_indices, num_instances, first_vertex, first_instance);
             }
         };
-        cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, handle);
+        gpu_scheduler->BindGraphicsPipeline(cmdbuf, handle);
         draw();
         if (square) [[unlikely]] {
-            cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, square);
+            gpu_scheduler->BindGraphicsPipeline(cmdbuf, square);
             draw();
         }
     });
@@ -1328,6 +1329,7 @@ void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_in
                                  : sizeof(VkDrawIndirectCommand)));
     const vk::Pipeline handle = pipeline->Handle();
     const vk::Pipeline square = SquarePass(*pipeline);
+    Scheduler* const gpu_scheduler = &scheduler;
     const vk::Buffer args = buffer->Handle();
     const u64 args_offset = base;
     const vk::Buffer counts = count_address != 0 ? count_buffer->Handle() : vk::Buffer{};
@@ -1337,7 +1339,7 @@ void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_in
             if (!bound) {
                 break;
             }
-            cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, bound);
+            gpu_scheduler->BindGraphicsPipeline(cmdbuf, bound);
             if (is_indexed) {
                 if (counts) {
                     cmdbuf.drawIndexedIndirectCount(args, args_offset, counts, counts_offset, max_count,
@@ -1959,9 +1961,9 @@ void Rasterizer::BindIndexBuffer(u32 index_offset) {
 }
 
 void Rasterizer::EmitIndexBuffer() {
-    scheduler.Record([handle = index_bind.handle, offset = index_bind.offset,
-                      type = index_bind.type](vk::CommandBuffer cmdbuf) {
-        cmdbuf.bindIndexBuffer(handle, offset, type);
+    scheduler.Record([gpu_scheduler = &scheduler, handle = index_bind.handle,
+                      offset = index_bind.offset, type = index_bind.type](vk::CommandBuffer cmdbuf) {
+        gpu_scheduler->BindIndexBuffer(cmdbuf, handle, offset, type);
     });
 }
 
