@@ -24,12 +24,19 @@ GPU_ITEM = re.compile(r"^\s+([\d.]+) ms/frame\s+([\d.]+)/frame\s+(.+?)\s*$")
 COMPILES = re.compile(r"(\d+) shader/pipeline compiles")
 WORKERS = re.compile(r"GPU: draw preparation workers: (\d+)")
 PIPE = re.compile(r"Draw pipe: ([\d.]+) draws/s pipelined, ([\d.]+) drains/s that waited, stage A waited ([\d.]+)%, stage B busy ([\d.]+)%")
+STALL = re.compile(r"Stall: ([\d.]+) ms frame; waits: readback [\d.]+ ms, GPU ticks ([\d.]+) ms")
+STALL_CPU = re.compile(r"GPU thread on CPU ([\d.]+) ms")
+STALL_DRAWS = re.compile(r"\s+(\d+) draws, (\d+) dispatches")
+HEAVY_DRAWS = 1000
 PROFILES = {
     "baseline": {},
     "prep4": {"TLG_PREP_WORKERS": "4"},
     "prep2": {"TLG_PREP_WORKERS": "2"},
     "drawpipe-off": {"TLG_DRAW_PIPE": "0"},
     "gpu-profile": {"TLG_GPU_PROFILE": "1"},
+    # Experimental: keep Vulkan timestamp instrumentation off the draw-pipe recording thread.
+    # This is NOT validated as a deadlock fix, and results have different CPU scheduling.
+    "gpu-profile-nopipe": {"TLG_GPU_PROFILE": "1", "TLG_DRAW_PIPE": "0"},
 }
 
 
@@ -51,16 +58,25 @@ def analyze(content, skip_windows=0):
     gpu_windows = []
     gpu_labels = {}
     pipes = []
+    stalls = []
+    all_windows = []
     current_gpu = None
     frame_count = 0
-    for line in lines:
+    for line_index, line in enumerate(lines):
+        stall = STALL.search(line)
+        if stall:
+            cpu = STALL_CPU.search(lines[line_index + 2]) if line_index + 2 < len(lines) else None
+            draw = STALL_DRAWS.search(lines[line_index + 3]) if line_index + 3 < len(lines) else None
+            stalls.append({"frame_ms": float(stall.group(1)),
+                           "gpu_ticks_ms": float(stall.group(2)),
+                           "gpu_thread_cpu_ms": float(cpu.group(1)) if cpu else None,
+                           "draws": int(draw.group(1)) if draw else None,
+                           "dispatches": int(draw.group(2)) if draw else None})
         match = FRAME.search(line)
         if match:
             frame_count += 1
-            if frame_count <= skip_windows:
-                continue
             fps, worst, draws = match.groups()
-            windows.append({
+            all_windows.append({
                 "window": frame_count,
                 "approx_seconds": frame_count * 5,
                 "fps": float(fps),
@@ -72,9 +88,9 @@ def analyze(content, skip_windows=0):
             })
             continue
         pacing = PACING.search(line)
-        if pacing and windows and windows[-1]["window"] == frame_count:
-            windows[-1]["pacing_p99_ms"] = float(pacing.group(3))
-            windows[-1]["pacing_stddev_ms"] = float(pacing.group(2))
+        if pacing and all_windows and all_windows[-1]["window"] == frame_count:
+            all_windows[-1]["pacing_p99_ms"] = float(pacing.group(3))
+            all_windows[-1]["pacing_stddev_ms"] = float(pacing.group(2))
             continue
         profile = GPU.search(line)
         if profile:
@@ -99,11 +115,31 @@ def analyze(content, skip_windows=0):
                           "drains_per_second": float(drains),
                           "stage_a_wait_pct": float(stage_a),
                           "stage_b_busy_pct": float(stage_b)})
+    # Never hide every captured window just because the user ended a run before warm-up.
+    post_warmup = [w for w in all_windows if w["window"] > skip_windows]
+    windows = post_warmup if post_warmup else all_windows
+    fallback = bool(skip_windows and all_windows and not post_warmup)
+    heavy_windows = [w for w in all_windows if w["draws"] >= HEAVY_DRAWS]
+    heavy_stalls = [x for x in stalls if x["draws"] is not None and x["draws"] >= HEAVY_DRAWS]
     first = WORKERS.search(content)
     p99s = [w["pacing_p99_ms"] for w in windows if w["pacing_p99_ms"] is not None]
     return {
         "window_seconds": 5,
         "skipped_windows": skip_windows,
+        "post_warmup_windows": len(post_warmup),
+        "warmup_fallback_to_all_windows": fallback,
+        "all_window_count": len(all_windows),
+        "all_frame_windows": all_windows,
+        "heavy_draw_threshold": HEAVY_DRAWS,
+        "heavy_window_count": len(heavy_windows),
+        "heavy_fps_windows": number_stats([w["fps"] for w in heavy_windows]),
+        "heavy_draws_windows": number_stats([w["draws"] for w in heavy_windows]),
+        "heavy_frame_windows": heavy_windows,
+        "heavy_stall_count": len(heavy_stalls),
+        "heavy_gpu_ticks_ms": number_stats([x["gpu_ticks_ms"] for x in heavy_stalls]),
+        "heavy_gpu_cpu_ms": number_stats([x["gpu_thread_cpu_ms"] for x in heavy_stalls if x["gpu_thread_cpu_ms"] is not None]),
+        "heavy_stalls": heavy_stalls,
+        "freeze_reported": "FREEZE: no frame for" in content,
         "window_count": len(windows),
         "fps_5s_windows": number_stats([w["fps"] for w in windows]),
         "worst_frame_ms_windows": number_stats([w["worst_ms"] for w in windows]),
@@ -133,7 +169,10 @@ def report(summary):
     data = summary["analysis"]
     print("\nScene performance:", label)
     print("Measured 5-second windows:", data["window_count"],
-          "| after skipped windows:", data["skipped_windows"])
+          "| post-warmup:", data["post_warmup_windows"],
+          "| all:", data["all_window_count"])
+    if data["warmup_fallback_to_all_windows"]:
+        print("  WARNING: run ended before configured warm-up; using ALL captured windows.")
     for key in ("fps_5s_windows", "worst_frame_ms_windows", "p99_ms_windows",
                 "draws_per_frame_windows", "gpu_ms_per_frame"):
         v = data[key]
@@ -141,6 +180,13 @@ def report(summary):
                "median={} min={} max={}".format(v["median"], v["min"], v["max"])))
     print("  below 29.5 FPS:", data["below_29_5_fps_windows"],
           "| prep workers:", data["prep_workers"])
+    print("  heavy scene (>={}) windows: {}; FPS: {}; median GPU ticks: {} ms; GPU-thread CPU: {} ms".format(
+        data["heavy_draw_threshold"], data["heavy_window_count"],
+        "n/a" if not data["heavy_fps_windows"] else data["heavy_fps_windows"]["median"],
+        "n/a" if not data["heavy_gpu_ticks_ms"] else data["heavy_gpu_ticks_ms"]["median"],
+        "n/a" if not data["heavy_gpu_cpu_ms"] else data["heavy_gpu_cpu_ms"]["median"]))
+    if data["freeze_reported"]:
+        print("  WARNING: FREEZE report found; a profiler hang is not a valid GPU performance sample.")
     if data["gpu_expensive_labels"]:
         print("  GPU passes (ranked by average ms/frame, sampled with profiling overhead):")
         for item in data["gpu_expensive_labels"][:8]:
