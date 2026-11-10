@@ -455,6 +455,25 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
     }
 
     EndRendering();
+    // Diagnostic only, and only for the experimental GPU-state packet cache.
+    // Print at most once every 256 submissions (including the count for the
+    // first 256): no per-draw logging or thread contention.
+    static const bool report_bind_cache = [] {
+        const char* env = std::getenv("TLG_GPU_BIND_CACHE");
+        return env && env[0] == '1' && env[1] == '\0';
+    }();
+    if (report_bind_cache) {
+        static u32 submitted = 0;
+        if (++submitted % 256 == 0) {
+            // SyncRecording below ensures all buffered graphics callbacks have
+            // executed before we read the cumulative value.
+            SyncRecording();
+            std::printf("GPU draw bind cache: %llu redundant graphics pipeline binds skipped "
+                        "(%u submissions)\\n",
+                        static_cast<unsigned long long>(SkippedGraphicsPipelineBinds()),
+                        submitted);
+        }
+    }
     if (auto* profiler = GpuProfiler::Get(); profiler && profiler->Records(this)) {
         // Until the next submission's first timestamp: mostly the GPU waiting for it.
         profiler->Mark(0x5B317ull, [] { return std::string{"(between submissions: GPU idle)"}; });
