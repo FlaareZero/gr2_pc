@@ -1957,10 +1957,29 @@ void Rasterizer::ResetBindings(bool is_compute) {
     for (auto& image_id : bound_images) {
         texture_cache.GetImage(image_id).binding = {};
     }
+    // The original code marked every graphics buffer access as ALL_GRAPHICS,
+    // even fixed-function index/vertex fetches. This widens subsequent WAR
+    // execution dependencies and can stall unrelated stages of the GPU.
+    // Only narrow access types with an unambiguous Vulkan pipeline stage;
+    // shader buffers retain the conservative original stage mask.
+    // TLG_PRECISE_BUFFER_STAGES=0 restores the exact old masks for A/B.
+    static const bool precise_stages = [] {
+        const char* env = std::getenv("TLG_PRECISE_BUFFER_STAGES");
+        return !(env && env[0] == '0');
+    }();
     for (const auto [buffer, offset, size, src_access] : bound_buffers) {
-        const auto dst_stage = is_compute ? vk::PipelineStageFlagBits2::eComputeShader
-                                          : vk::PipelineStageFlagBits2::eAllGraphics;
-        runtime.AccessBuffer(buffer, offset, size, dst_stage, src_access);
+        vk::PipelineStageFlags2 stage = is_compute ? vk::PipelineStageFlagBits2::eComputeShader
+                                                   : vk::PipelineStageFlagBits2::eAllGraphics;
+        if (precise_stages) {
+            if (src_access == vk::AccessFlagBits2::eIndexRead) {
+                stage = vk::PipelineStageFlagBits2::eIndexInput;
+            } else if (src_access == vk::AccessFlagBits2::eVertexAttributeRead) {
+                stage = vk::PipelineStageFlagBits2::eVertexAttributeInput;
+            } else if (src_access == vk::AccessFlagBits2::eIndirectCommandRead) {
+                stage = vk::PipelineStageFlagBits2::eDrawIndirect;
+            }
+        }
+        runtime.AccessBuffer(buffer, offset, size, stage, src_access);
     }
     bound_images.clear();
     bound_buffers.clear();
@@ -2538,8 +2557,22 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
             }
             image_infos.emplace_back(VK_NULL_HANDLE, view, layout);
             if (set_ok && binding_index < resolved.size()) {
-                resolved[binding_index] = {image_id, *image_view.image_view, image.backing,
-                                           desc.view_info.range};
+                auto& cached = resolved[binding_index];
+                cached = {image_id, *image_view.image_view, image.backing,
+                          desc.view_info.range};
+                cached.image_uid = image.image_uid;
+                // The same strict exact-match attributes checked in
+                // TextureCache::FindImage::still_exact, plus native base view.
+                cached.exact_original =
+                    image.image_uid != 0 &&
+                    (static_cast<u32>(image.flags) &
+                     static_cast<u32>(VideoCore::ImageFlagBits::Registered)) &&
+                    desc.info.guest_address == image.info.guest_address &&
+                    desc.info.guest_size == image.info.guest_size &&
+                    desc.info.size == image.info.size &&
+                    desc.info.pixel_format == image.info.pixel_format &&
+                    desc.view_info.range.base.level == 0 &&
+                    desc.view_info.range.base.layer == 0;
                 set_ok = !is_storage && !binding.force_general && !binding.is_target;
             }
         }
@@ -2641,12 +2674,45 @@ bool Rasterizer::BindTexturesFromSet(const Shader::Info& stage, const PreparedSt
     key |= 1; // 0 marks an empty slot
     auto& set = texture_sets[key % texture_sets.size()];
     slot = &set;
+
     const u64 generation = texture_cache.RegistryGeneration();
-    const bool match = set.key == key && set.stage == &stage && set.count == count &&
-                       set.generation == generation &&
-                       set.scene_generation == scene_targets->Generation() &&
-                       std::equal(set.hashes.begin(), set.hashes.begin() + count,
-                                  prepared->image_hashes);
+    const bool same_set = set.key == key && set.stage == &stage && set.count == count &&
+                          set.scene_generation == scene_targets->Generation() &&
+                          std::equal(set.hashes.begin(), set.hashes.begin() + count,
+                                     prepared->image_hashes);
+    bool generation_ok = set.generation == generation;
+    // A global registry bump often concerns an unrelated image. TextureCache::FindImage
+    // already permits reusing a registered exact match across such bumps. Apply the
+    // same conservative rule to entire read-only texture sets: every entry must
+    // have been an exact original image (not an overlap view or scene proxy), still
+    // be registered, and retain its unique image UID. Normal binding validation
+    // below still checks backing, dirty/rebind state, layouts and proxy eligibility.
+    // Opt-in pending same-scene visual and performance validation.
+    static const bool exact_sets = [] {
+        const char* env = std::getenv("TLG_TEXTURE_SET_EXACT");
+        return env && env[0] == '1';
+    }();
+    if (same_set && !generation_ok && exact_sets) {
+        generation_ok = true;
+        for (u32 i = 0; i < count; ++i) {
+            const auto& entry = set.entries[i];
+            if (!entry.exact_original || !entry.id || !entry.image_uid) {
+                generation_ok = false;
+                break;
+            }
+            const auto* image = texture_cache.TryGetImage(entry.id, entry.image_uid);
+            if (!image || !(static_cast<u32>(image->flags) &
+                            static_cast<u32>(VideoCore::ImageFlagBits::Registered))) {
+                generation_ok = false;
+                break;
+            }
+        }
+        if (generation_ok) {
+            set.generation = generation;
+            ++texture_set_cross_generation_hits;
+        }
+    }
+    const bool match = same_set && generation_ok;
     if (!match) {
         ++texture_set_why[set.key != key ? 0 : set.generation != generation ? 1 : 3];
         ++texture_set_misses;
@@ -2721,14 +2787,16 @@ RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
                     static_cast<unsigned long long>(texture_set_hits),
                     static_cast<unsigned long long>(texture_set_misses));
         std::printf("  texture set misses: other key %llu, generation %llu, image check %llu, "
-                    "other %llu\n",
+                    "other %llu; exact cross-generation validations %llu\n",
                     (unsigned long long)texture_set_why[0], (unsigned long long)texture_set_why[1],
-                    (unsigned long long)texture_set_why[2], (unsigned long long)texture_set_why[3]);
+                    (unsigned long long)texture_set_why[2], (unsigned long long)texture_set_why[3],
+                    (unsigned long long)texture_set_cross_generation_hits);
         std::printf("  scene proxies sampled directly: %llu bindings\n",
                     static_cast<unsigned long long>(proxy_samples));
         proxy_samples = 0;
         texture_set_why = {};
         begin_memo_hits = begin_memo_misses = texture_set_hits = texture_set_misses = 0;
+        texture_set_cross_generation_hits = 0;
     }
     BeginSignature signature;
     if (memo_on) {
