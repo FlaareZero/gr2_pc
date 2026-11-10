@@ -58,7 +58,7 @@ public:
 private:
     GpuProfiler(const Instance& instance, Scheduler& scheduler);
     void WriteTimestamp(u64 key);
-    void Collect(u32 slice);
+    bool Collect(u32 slice); // non-blocking; false while query timestamps remain in flight
     void Print();
 
     static constexpr u32 NumSlices = 4;

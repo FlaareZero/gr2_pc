@@ -605,6 +605,16 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
         .needs_unorm_fixup = instance.GetDriverID() == vk::DriverId::eMesaKosmickrisp,
         .needs_clip_distance_emulation = instance.GetDriverID() == vk::DriverId::eNvidiaProprietary,
         .supports_shader_stencil_export = instance_.IsShaderStencilExportSupported(),
+        // Static for the process, and part of Shader::Profile cache identity.
+        // The pipeline cache rejects old SPIR-V when these switches change.
+        .graphics_cse_vertex = [] {
+            const char* v = std::getenv("TLG_GFX_CSE_VERTEX");
+            return v && v[0] == '1' && v[1] == '\0';
+        }(),
+        .graphics_cse_fragment = [] {
+            const char* v = std::getenv("TLG_GFX_CSE_FRAGMENT");
+            return v && v[0] == '1' && v[1] == '\0';
+        }(),
     };
     // tlg: the recompiler switches (ISS_ names arrive as TLG_), one line each on stdout (the run
     // log keeps it; LOG_INFO is filtered out there), for A/B reports.
