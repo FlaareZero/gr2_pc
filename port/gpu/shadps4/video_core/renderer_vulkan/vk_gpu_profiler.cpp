@@ -33,6 +33,10 @@ GpuProfiler::GpuProfiler(const Instance& instance, Scheduler& scheduler_)
 }
 
 void GpuProfiler::WriteTimestamp(u64 key) {
+    // Do not reuse a query slice whose previous commands may still be running.
+    if (pending[slice]) {
+        return; // this pool slice is still used by the GPU; never overwrite it
+    }
     if (used[slice] + 1 >= SliceQueries) {
         return; // the frame's slice is full: the rest of the frame goes to the last label
     }
@@ -49,7 +53,7 @@ void GpuProfiler::WriteTimestamp(u64 key) {
 
 void GpuProfiler::BeginFrame() {
     // Close the frame: one more timestamp without a label.
-    if (used[slice] > 0 && used[slice] < SliceQueries) {
+    if (!pending[slice] && used[slice] > 0 && used[slice] < SliceQueries) {
         scheduler.EndRendering();
         const u32 query = slice * SliceQueries + used[slice]++;
         scheduler.Record([pool = *pool, query](vk::CommandBuffer cmdbuf) {
@@ -59,8 +63,12 @@ void GpuProfiler::BeginFrame() {
     }
     slice = (slice + 1) % NumSlices;
     // The oldest slice: its frame was submitted four frames ago.
-    if (pending[slice]) {
-        Collect(slice);
+    if (pending[slice] && !Collect(slice)) {
+        // The GPU might not even have received the recorded timestamp yet.
+        // Waiting for it here can deadlock the submission thread. Drop new
+        // timestamps for this slice until its previous queries are ready.
+        Print();
+        return;
     }
     if (used[slice]) {
         device.resetQueryPool(*pool, slice * SliceQueries, used[slice]);
@@ -71,15 +79,21 @@ void GpuProfiler::BeginFrame() {
     Print();
 }
 
-void GpuProfiler::Collect(u32 which) {
+bool GpuProfiler::Collect(u32 which) {
     const u32 count = used[which];
+    if (count < 2 || keys[which].size() + 1 != count) return false;
     std::vector<u64> stamps(count);
-    // Four frames on this is complete unless the GPU lags that far: then wait for it.
+    // Poll an older frame WITHOUT VK_QUERY_RESULT_WAIT_BIT: the GPU can be behind.
     const auto result = device.getQueryPoolResults(
         *pool, which * SliceQueries, count, count * sizeof(u64), stamps.data(), sizeof(u64),
-        vk::QueryResultFlagBits::e64 | vk::QueryResultFlagBits::eWait);
+        vk::QueryResultFlagBits::e64);
+    if (result == vk::Result::eNotReady) {
+        return false;
+    }
     if (result != vk::Result::eSuccess) {
-        return;
+        std::printf("GPU profile: query error %d, retrying without blocking\n",
+                    static_cast<int>(result));
+        return false;
     }
     for (u32 i = 0; i + 1 < count; ++i) {
         const double ms = double(stamps[i + 1] - stamps[i]) * period_ns / 1e6;
@@ -88,6 +102,7 @@ void GpuProfiler::Collect(u32 which) {
         ++total.segments;
     }
     ++frames;
+    return true;
 }
 
 void GpuProfiler::Print() {

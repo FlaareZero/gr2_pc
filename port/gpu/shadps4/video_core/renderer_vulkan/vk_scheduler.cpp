@@ -109,12 +109,17 @@ void Scheduler::BeginRendering(const RenderState& new_state) {
     };
 
     if (!recording_threaded) {
+        last_graphics_pipeline = vk::Pipeline{};
         current_cmdbuf.beginRendering(rendering_info);
         return;
     }
     // The attachment infos live on this stack frame: the recorded closure keeps copies.
-    Record([info = rendering_info, color_attachments, depth_attachment,
+    Record([this, info = rendering_info, color_attachments, depth_attachment,
             stencil_attachment](vk::CommandBuffer cmdbuf) mutable {
+        // A changed render scope is a conservative invalidation boundary.
+        // The cache never assumes a graphics pipeline bound by unrelated
+        // rendering code still matches the previous guest draw.
+        last_graphics_pipeline = vk::Pipeline{};
         info.pColorAttachments = color_attachments.data();
         if (info.pDepthAttachment) {
             info.pDepthAttachment = &depth_attachment;
@@ -238,8 +243,23 @@ void Scheduler::KickRecording(bool force) {
     CheckOwner(__builtin_return_address(0));
     // Callers kick where nobody holds the raw command buffer: deferral resumes.
     direct_mode = false;
-    // Batches of tens of KiB keep the queue handoff cheap relative to the work it carries.
-    if (!force && full_chunks.empty() && record_chunk->Size() < 32 * 1024) {
+    // On CPUs with >=12 hardware threads (including the 7735U), larger batches
+    // amortize the recorder mutex, queue transfers, and worker wakeups across
+    // the thousands of Vulkan commands produced by crowded scenes.
+    // The 128 KiB command chunks still preserve order and all sync points
+    // force a flush. TLG_RECORD_BATCH_KB=32 restores the original behavior.
+    static const size_t batch_bytes = [] {
+        const size_t default_kib = TlgThreads::SizingCount() >= 12 ? 64 : 32;
+        if (const char* raw = std::getenv("TLG_RECORD_BATCH_KB"); raw && raw[0]) {
+            char* end = nullptr;
+            const unsigned long parsed = std::strtoul(raw, &end, 10);
+            if (end != raw && *end == '\0' && parsed >= 16 && parsed <= 96) {
+                return size_t(parsed) * 1024;
+            }
+        }
+        return default_kib * 1024;
+    }();
+    if (!force && full_chunks.empty() && record_chunk->Size() < batch_bytes) {
         return;
     }
     if (full_chunks.empty() && record_chunk->Empty()) {
@@ -401,6 +421,9 @@ void Scheduler::AllocateWorkerCommandBuffers() {
 
     current_cmdbuf = command_pool.Commit();
     Check(current_cmdbuf.begin(begin_info));
+    // Reset after the previous buffer's recorder has finished (SubmitExecution
+    // called SyncRecording first). Vulkan state never survives command buffers.
+    last_graphics_pipeline = vk::Pipeline{};
 
     // Invalidate dynamic state so it gets applied to the new command buffer.
     dynamic_state.Invalidate();
@@ -432,6 +455,25 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
     }
 
     EndRendering();
+    // Diagnostic only, and only for the experimental GPU-state packet cache.
+    // Print at most once every 256 submissions (including the count for the
+    // first 256): no per-draw logging or thread contention.
+    static const bool report_bind_cache = [] {
+        const char* env = std::getenv("TLG_GPU_BIND_CACHE");
+        return env && env[0] == '1' && env[1] == '\0';
+    }();
+    if (report_bind_cache) {
+        static u32 submitted = 0;
+        if (++submitted % 256 == 0) {
+            // SyncRecording below ensures all buffered graphics callbacks have
+            // executed before we read the cumulative value.
+            SyncRecording();
+            std::printf("GPU draw bind cache: %llu redundant graphics pipeline binds skipped "
+                        "(%u submissions)\n",
+                        static_cast<unsigned long long>(SkippedGraphicsPipelineBinds()),
+                        submitted);
+        }
+    }
     if (auto* profiler = GpuProfiler::Get(); profiler && profiler->Records(this)) {
         // Until the next submission's first timestamp: mostly the GPU waiting for it.
         profiler->Mark(0x5B317ull, [] { return std::string{"(between submissions: GPU idle)"}; });

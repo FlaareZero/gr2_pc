@@ -45,6 +45,14 @@ jobs:
             libxi-dev libxss-dev libxtst-dev libxkbcommon-dev libwayland-dev wayland-protocols \
             libdecor-0-dev libegl-dev libgl-dev libdrm-dev libgbm-dev libpulse-dev libasound2-dev \
             libpipewire-0.3-dev libudev-dev libdbus-1-dev libusb-1.0-0-dev libfreetype-dev
+      - name: HLE lifecycle smoke (no game assets)
+        run: |
+          mkdir -p out
+          "$CXX" -std=c++20 -O2 -pthread -I gpu/shim -I gpu/shadps4 \
+            tests/test_hle_thread_lifecycle.cpp -o out/test_hle_thread_lifecycle
+          timeout 15 ./out/test_hle_thread_lifecycle
+          bash -n ../scripts/test_jirga_integrated.sh
+          bash ../scripts/test_jirga_integrated.sh --help >/dev/null
       - name: Cache built libraries
         id: deps
         uses: actions/cache@v4
@@ -112,6 +120,11 @@ jobs:
         run: |
           export MSYS2_ROOT=$(cygpath -u "$MSYS2_ROOT")
           TLG_LTO=OFF bash build.sh
+      - name: HLE lifecycle smoke (Windows, no game assets)
+        run: |
+          clang++ -std=c++20 -O2 -pthread -I gpu/shim -I gpu/shadps4 \
+            tests/test_hle_thread_lifecycle.cpp -o out/test_hle_thread_lifecycle.exe
+          ./out/test_hle_thread_lifecycle.exe
       - name: Package
         env:
           MSYS2_ROOT: ${{ runner.temp }}/msys64
