@@ -18,6 +18,7 @@ import subprocess
 import sys
 import tarfile
 import urllib.request
+import zipfile
 
 PORT = Path(__file__).resolve().parents[1]
 RELEASE_TAG = "v2026.10.24-a2e69a1"
@@ -239,7 +240,17 @@ def main(argv=None):
                                            shared, args.seconds)
     summary = run_dir / "summary.json"
     summary.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    # Package logs and loader results only; never archive temporary saves/caches.
+    bundle = run_dir / "diagnostics.zip"
+    with zipfile.ZipFile(bundle, "w", compression=zipfile.ZIP_DEFLATED) as output:
+        output.write(summary, arcname="summary.json")
+        for name, _ in variants:
+            for filename in ("run.log", "ldd_probe.txt", "ldd_gpu.txt"):
+                evidence = run_dir / name / filename
+                if evidence.is_file():
+                    output.write(evidence, arcname=name + "/" + filename)
     print("\nDone. Summary:", summary)
+    print("Evidence archive (no save files or shader caches):", bundle)
     print("Record which variant actually showed gameplay; FPS alone does not prove it.")
     print("Logs can include private local paths: review before sharing publicly.")
     return 0
