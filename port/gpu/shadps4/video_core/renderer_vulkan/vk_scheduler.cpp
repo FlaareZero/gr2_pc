@@ -91,6 +91,79 @@ void Scheduler::BindIndexBuffer(vk::CommandBuffer cmdbuf, vk::Buffer buffer,
     }
 }
 
+// Compare the exact recorded Vulkan state, not a guest shader hash. Memcmp
+// is conservative if the Vulkan-Hpp structs contain padding: false negatives
+// merely emit the original command, never skip a different semantic state.
+template <typename T>
+static bool SameRecordedItems(const std::vector<T>& old, std::span<const T> next) {
+    return old.size() == next.size() &&
+           (next.empty() || std::memcmp(old.data(), next.data(), next.size_bytes()) == 0);
+}
+
+void Scheduler::SetVertexInput(
+    vk::CommandBuffer cmdbuf,
+    std::span<const vk::VertexInputBindingDescription2EXT> bindings,
+    std::span<const vk::VertexInputAttributeDescription2EXT> attributes) {
+    static const bool enabled = [] {
+        const char* e = std::getenv("TLG_GPU_BIND_DEDUP");
+        return e && e[0] == '1' && e[1] == '\0';
+    }();
+    // Chained pNext payloads might change behind an unchanged pointer. We
+    // cannot compare them as value objects, so exclude that case entirely.
+    const bool simple = std::ranges::all_of(bindings, [](const auto& v) { return !v.pNext; }) &&
+                        std::ranges::all_of(attributes, [](const auto& v) { return !v.pNext; });
+    if (enabled && simple && cached_vertex_input_valid &&
+        SameRecordedItems(cached_vertex_bindings, bindings) &&
+        SameRecordedItems(cached_vertex_attributes, attributes)) {
+        ++gpu_binds_skipped;
+        return;
+    }
+    cmdbuf.setVertexInputEXT(bindings, attributes);
+    ++gpu_binds_issued;
+    if (enabled) {
+        cached_vertex_input_valid = simple;
+        if (simple) {
+            cached_vertex_bindings.assign(bindings.begin(), bindings.end());
+            cached_vertex_attributes.assign(attributes.begin(), attributes.end());
+        }
+    }
+}
+
+void Scheduler::BindVertexBuffers(vk::CommandBuffer cmdbuf,
+                                   std::span<const vk::Buffer> buffers,
+                                   std::span<const vk::DeviceSize> offsets,
+                                   std::span<const vk::DeviceSize> sizes,
+                                   std::span<const vk::DeviceSize> strides) {
+    static const bool enabled = [] {
+        const char* e = std::getenv("TLG_GPU_BIND_DEDUP");
+        return e && e[0] == '1' && e[1] == '\0';
+    }();
+    const bool extended = !sizes.empty() || !strides.empty();
+    if (enabled && cached_vertex_buffers_valid &&
+        SameRecordedItems(cached_vertex_buffers, buffers) &&
+        SameRecordedItems(cached_vertex_offsets, offsets) &&
+        SameRecordedItems(cached_vertex_sizes, sizes) &&
+        SameRecordedItems(cached_vertex_strides, strides)) {
+        ++gpu_binds_skipped;
+        return;
+    }
+    if (extended) {
+        cmdbuf.bindVertexBuffers2(0, static_cast<u32>(buffers.size()), buffers.data(),
+                                  offsets.data(), sizes.data(), strides.data());
+    } else {
+        cmdbuf.bindVertexBuffers(0, static_cast<u32>(buffers.size()),
+                                 buffers.data(), offsets.data());
+    }
+    ++gpu_binds_issued;
+    if (enabled) {
+        cached_vertex_buffers.assign(buffers.begin(), buffers.end());
+        cached_vertex_offsets.assign(offsets.begin(), offsets.end());
+        cached_vertex_sizes.assign(sizes.begin(), sizes.end());
+        cached_vertex_strides.assign(strides.begin(), strides.end());
+        cached_vertex_buffers_valid = true;
+    }
+}
+
 void Scheduler::BeginRendering(const RenderState& new_state) {
     if (is_rendering && render_state == new_state) {
         return;
