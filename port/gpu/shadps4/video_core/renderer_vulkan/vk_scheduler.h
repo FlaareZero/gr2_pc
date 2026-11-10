@@ -619,8 +619,11 @@ public:
     void Execute(vk::CommandBuffer cmdbuf) {
         for (CommandBase* command = first; command;) {
             CommandBase* const next = command->next;
-            command->Execute(cmdbuf);
-            command->~CommandBase();
+            // One type-erased thunk both executes and destroys the closure.
+            // The old virtual Execute + virtual destructor required two
+            // vtable calls per recorded Vulkan command (~tens of thousands
+            // of commands per busy frame).
+            command->execute_and_destroy(command, cmdbuf);
             command = next;
         }
         first = last = nullptr;
@@ -647,16 +650,18 @@ private:
     }
 
     struct CommandBase {
-        virtual ~CommandBase() = default;
-        virtual void Execute(vk::CommandBuffer cmdbuf) = 0;
         CommandBase* next{};
+        void (*execute_and_destroy)(CommandBase*, vk::CommandBuffer){};
     };
     template <typename Func>
     struct TypedCommand final : CommandBase {
-        explicit TypedCommand(Func&& func_) : func{std::move(func_)} {}
-        explicit TypedCommand(const Func& func_) : func{func_} {}
-        void Execute(vk::CommandBuffer cmdbuf) override {
-            func(cmdbuf);
+        explicit TypedCommand(Func&& func_) : CommandBase{nullptr, &Run}, func{std::move(func_)} {}
+        explicit TypedCommand(const Func& func_) : CommandBase{nullptr, &Run}, func{func_} {}
+
+        static void Run(CommandBase* base, vk::CommandBuffer cmdbuf) {
+            auto* command = static_cast<TypedCommand*>(base);
+            command->func(cmdbuf);
+            command->~TypedCommand();
         }
         Func func;
     };
