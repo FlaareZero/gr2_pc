@@ -701,6 +701,14 @@ public:
     /// Attempts to execute operations whose tick the GPU has caught up with.
     void PopPendingOperations();
 
+    /// GPU command-stream state deduplication, executed only on the Vulkan
+    /// recorder thread (or on the caller in direct-recording mode). Vulkan
+    /// calls are omitted *only* when state matches exactly inside a render scope.
+    /// This never changes the number or order of guest draw commands.
+    void BindGraphicsPipeline(vk::CommandBuffer cmdbuf, vk::Pipeline pipeline);
+    void BindIndexBuffer(vk::CommandBuffer cmdbuf, vk::Buffer buffer, vk::DeviceSize offset,
+                         vk::IndexType type);
+
     /// Starts a new rendering scope with provided state.
     void BeginRendering(const RenderState& new_state);
 
@@ -743,6 +751,9 @@ public:
             direct_recordings.fetch_add(1, std::memory_order_relaxed);
             TraceDirectRecording(__builtin_return_address(0));
         }
+        // A raw caller is free to change *any* graphics bind state. The
+        // recorder has been drained above, so this invalidation is ordered.
+        ResetGraphicsBindCache();
         return current_cmdbuf;
     }
 
@@ -915,6 +926,11 @@ public:
     }
 
 private:
+    void ResetGraphicsBindCache() noexcept {
+        cached_graphics_pipeline = vk::Pipeline{};
+        cached_index_valid = false;
+    }
+
     void AllocateWorkerCommandBuffers();
 
     std::unique_ptr<RecordChunk> AcquireChunk();
@@ -930,6 +946,16 @@ private:
     Semaphore work_semaphore;
     CommandPool command_pool;
     DynamicState dynamic_state;
+    // Only the active Vulkan command-buffer recording thread accesses these.
+    // Reset on begin/end rendering, raw command-buffer access and new buffers.
+    vk::Pipeline cached_graphics_pipeline{};
+    vk::Buffer cached_index_buffer{};
+    vk::DeviceSize cached_index_offset{};
+    vk::IndexType cached_index_type{};
+    bool cached_index_valid = false;
+    u64 gpu_binds_issued = 0;
+    u64 gpu_binds_skipped = 0;
+    u32 gpu_bind_log_submissions = 0;
     SubmitFunc on_submit{};
     vk::CommandBuffer current_cmdbuf;
     std::condition_variable_any event_cv;
