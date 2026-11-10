@@ -112,6 +112,79 @@ using the benchmark logs if desired. A regular game launch with
 The script does not launch a background process, modify renderer files,
 or rewrite user saves. Gameplay itself may update saves normally.
 
+## Crowd-throughput experiment — when even FSR Performance does not help
+
+The tester confirmed that even the 960x540-internal FSR Performance preset
+still drops badly in crowded Jirga. This rules out *simple pixel fill rate*
+as a sufficient fix. The next active performance candidate is pipelining.
+
+In earlier baseline scenes with ~6,000–7,000 draws/frame, the GPU command
+thread spent ~18.8 ms on CPU and ~45.6 ms waiting for GPU ticks. Those
+are partially serial costs, not an exact GPU kernel duration. The present
+scheduler limits the command producer to 1 in-flight guest frame by
+default: permitting 2 may overlap CPU draw submission with GPU rendering
+and reduce costly producer/consumer bubbles. It may also increase latency
+and *cannot* increase the absolute GPU's geometry/command throughput.
+
+### New immediate native-resolution A/B (no rebuild)
+
+From the fork root, in the same crowded Jirga view:
+
+    bash scripts/play_jirga_fast.sh native
+    bash scripts/play_jirga_fast.sh crowd
+
+Both render **native 1080p with FSR off and 8 preparation workers**.
+The only main scheduling change is \`TLG_FRAMES_AHEAD=1\` to \`2\`.
+Track the FPS and stutter, especially when over 6,000 draws/frame.
+The launch script does not persist a configuration or touch the GPU
+library. A new GPU FPS regression would falsify this trial immediately.
+
+### Two further opt-in experiments
+
+If \`crowd\` is still bad, a separate mode changes Vulkan **command
+recording** (not shader compilation or image quality):
+
+    bash scripts/play_jirga_fast.sh crowd-direct
+
+This retains 2 in-flight guest frames, but sets
+\`TLG_VK_RECORD_THREAD=0\`, recording commands directly on the GPU
+command thread. It may worsen throughput; that is why it is a separate
+A/B mode and not a default.
+
+Alternatively, the texture cache offers two existing but
+**normally disabled** asynchronous GPU readback facilities:
+
+    bash scripts/play_jirga_fast.sh crowd-async
+
+This sets \`TLG_DEFERRED_READBACK=1\` and \`TLG_STALE_READBACK=1\`.
+The latter allows CPU reads of selected GPU-written data to observe
+the previous frame's completed copy to avoid a stall, while CPU writes
+still synchronize. It may introduce **one-frame stale data, visual
+artifacts, or gameplay bugs**. Try it only if the regular \`crowd\`
+mode is inadequate and keep saves backed up. Do not use for progression
+until visuals and gameplay correctness are established.
+
+The normal \`native\` reference reverts both readback switches to 0
+and the in-flight GPU queue to 1; no setting is saved by these wrappers.
+
+### Vulkan profiler hang fix (requires rebuild for profiling only)
+
+The original \`TLG_GPU_PROFILE=1\` used
+\`vkGetQueryPoolResults(WAIT_BIT)\` on the GPU command thread. This can
+deadlock when a timestamp has been recorded but not yet submitted.
+The Vulkan profiler now polls results **without WAIT_BIT** and does
+not reset a slice while its queries are still in flight. This change
+is for root-cause measurement, **not a performance improvement**:
+profiling still imposes overhead and must remain off for FPS A/B.
+Recompile the GPU library before retrying its profile mode.
+
+If the throughput modes still do not help, a reliable GPU pass
+breakdown in the heavy Jirga scene is the next step toward an actual
+Vulkan geometry/attachment optimization. Safe culling or instancing
+of crowd draws would require knowing which draws have interchangeable
+shaders/resources; blindly deleting thousands of draw calls would
+corrupt the picture.
+
 ## Procedure
 
 From the repository root, after fetching the performance branch, make
