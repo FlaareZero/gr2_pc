@@ -708,6 +708,13 @@ public:
     void BindGraphicsPipeline(vk::CommandBuffer cmdbuf, vk::Pipeline pipeline);
     void BindIndexBuffer(vk::CommandBuffer cmdbuf, vk::Buffer buffer, vk::DeviceSize offset,
                          vk::IndexType type);
+    void SetVertexInput(vk::CommandBuffer cmdbuf,
+                        std::span<const vk::VertexInputBindingDescription2EXT> bindings,
+                        std::span<const vk::VertexInputAttributeDescription2EXT> attributes);
+    void BindVertexBuffers(vk::CommandBuffer cmdbuf, std::span<const vk::Buffer> buffers,
+                           std::span<const vk::DeviceSize> offsets,
+                           std::span<const vk::DeviceSize> sizes = {},
+                           std::span<const vk::DeviceSize> strides = {});
 
     /// Starts a new rendering scope with provided state.
     void BeginRendering(const RenderState& new_state);
@@ -929,6 +936,8 @@ private:
     void ResetGraphicsBindCache() noexcept {
         cached_graphics_pipeline = vk::Pipeline{};
         cached_index_valid = false;
+        cached_vertex_input_valid = false;
+        cached_vertex_buffers_valid = false;
     }
 
     void AllocateWorkerCommandBuffers();
@@ -953,6 +962,14 @@ private:
     vk::DeviceSize cached_index_offset{};
     vk::IndexType cached_index_type{};
     bool cached_index_valid = false;
+    std::vector<vk::VertexInputBindingDescription2EXT> cached_vertex_bindings;
+    std::vector<vk::VertexInputAttributeDescription2EXT> cached_vertex_attributes;
+    bool cached_vertex_input_valid = false;
+    std::vector<vk::Buffer> cached_vertex_buffers;
+    std::vector<vk::DeviceSize> cached_vertex_offsets;
+    std::vector<vk::DeviceSize> cached_vertex_sizes;
+    std::vector<vk::DeviceSize> cached_vertex_strides;
+    bool cached_vertex_buffers_valid = false;
     u64 gpu_binds_issued = 0;
     u64 gpu_binds_skipped = 0;
     u32 gpu_bind_log_submissions = 0;
