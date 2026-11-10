@@ -82,6 +82,38 @@ void Scheduler::BindIndexBuffer(vk::CommandBuffer cmdbuf, vk::Buffer buffer,
     index_binding_valid = true;
 }
 
+void Scheduler::SetVertexInput(
+    vk::CommandBuffer cmdbuf,
+    std::span<const vk::VertexInputBindingDescription2EXT> bindings,
+    std::span<const vk::VertexInputAttributeDescription2EXT> attributes) {
+    if (draw_bind_stats_enabled) ++draw_vertex_input_calls;
+    const auto same_binding = [](const auto& a, const auto& b) {
+        return a.sType == b.sType && a.pNext == b.pNext &&
+               a.binding == b.binding && a.stride == b.stride &&
+               a.inputRate == b.inputRate && a.divisor == b.divisor;
+    };
+    const auto same_attribute = [](const auto& a, const auto& b) {
+        return a.sType == b.sType && a.pNext == b.pNext &&
+               a.location == b.location && a.binding == b.binding &&
+               a.format == b.format && a.offset == b.offset;
+    };
+    if (draw_bind_memo_enabled && vertex_input_valid &&
+        bindings.size() == last_vertex_bindings.size() &&
+        attributes.size() == last_vertex_attributes.size() &&
+        std::equal(bindings.begin(), bindings.end(), last_vertex_bindings.begin(), same_binding) &&
+        std::equal(attributes.begin(), attributes.end(), last_vertex_attributes.begin(),
+                   same_attribute)) {
+        if (draw_bind_stats_enabled) ++draw_vertex_input_skips;
+        return;
+    }
+    cmdbuf.setVertexInputEXT(bindings, attributes);
+    if (draw_bind_memo_enabled) {
+        last_vertex_bindings.assign(bindings.begin(), bindings.end());
+        last_vertex_attributes.assign(attributes.begin(), attributes.end());
+        vertex_input_valid = true;
+    }
+}
+
 Scheduler::~Scheduler() {
     if (recorder_thread.joinable()) {
         SyncRecording();
@@ -482,14 +514,18 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
         if (now - last_draw_bind_report >= std::chrono::seconds(5)) {
             std::fprintf(stderr,
                          "Vulkan draw bind memo: gfx skipped %llu/%llu, "
-                         "index skipped %llu/%llu, enabled=%d\n",
+                         "index skipped %llu/%llu, vertex-input skipped %llu/%llu, "
+                         "enabled=%d\n",
                          static_cast<unsigned long long>(draw_pipeline_skips),
                          static_cast<unsigned long long>(draw_pipeline_binds),
                          static_cast<unsigned long long>(draw_index_skips),
                          static_cast<unsigned long long>(draw_index_binds),
+                         static_cast<unsigned long long>(draw_vertex_input_skips),
+                         static_cast<unsigned long long>(draw_vertex_input_calls),
                          static_cast<int>(draw_bind_memo_enabled));
             draw_pipeline_skips = draw_pipeline_binds = 0;
             draw_index_skips = draw_index_binds = 0;
+            draw_vertex_input_skips = draw_vertex_input_calls = 0;
             last_draw_bind_report = now;
         }
     }
