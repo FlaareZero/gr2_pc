@@ -1,0 +1,18 @@
+name: Jirga performance tools
+on:
+  push:
+    branches: [perf/jirga-para-lhao]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  python-tests:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Syntax and unit tests
+        run: |
+          python3 -m py_compile scripts/jirga_perf.py scripts/test_jirga_perf.py
+          python3 -m unittest discover -s scripts -p test_jirga_perf.py -v
