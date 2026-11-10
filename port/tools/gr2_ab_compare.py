@@ -66,7 +66,7 @@ def download_release(cache, offline=False):
         if offline:
             raise RuntimeError("Official release not cached; omit --offline once")
         part = cache / (RELEASE_NAME + ".part")
-        print("Downloading signed-by-hash official upstream release (80 MB)...", flush=True)
+        print("Downloading SHA256-verified official upstream release (~80 MB)...", flush=True)
         try:
             req = urllib.request.Request(RELEASE_URL, headers={"User-Agent": "gr2-ab-test"})
             with urllib.request.urlopen(req, timeout=120) as response, open(part, "wb") as out:
