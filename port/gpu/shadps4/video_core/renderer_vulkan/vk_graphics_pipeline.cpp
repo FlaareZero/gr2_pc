@@ -279,13 +279,46 @@ GraphicsPipeline::GraphicsPipeline(
     const vk::PipelineShaderStageRequiredSubgroupSizeCreateInfo subgroup_size_ci = {
         .requiredSubgroupSize = 64,
     };
+    const vk::PipelineShaderStageRequiredSubgroupSizeCreateInfo subgroup_size_32 = {
+        .requiredSubgroupSize = 32,
+    };
+    // RDNA GPUs often execute fragment shaders efficiently as wave32. Only allow
+    // this as an explicit GPU experiment for fragment shaders whose IR declares
+    // no lane/subgroup operations. Compute and the other graphics stages keep
+    // their original wave64 behavior, preserving guest compute wave semantics.
+    // Requires the device's reported required-size support for fragment shaders.
+    static const bool try_wave32_fs = [] {
+        const char* env = std::getenv("TLG_FS_WAVE32");
+        return env && env[0] == '1' && env[1] == '\0';
+    }();
+    const auto* fs = infos[u32(Shader::SwStage::Fragment)];
+    const bool no_lane_ops =
+        fs && !fs->uses_lane_id && !fs->uses_group_quad && !fs->uses_group_shuffle &&
+        !fs->uses_group_ballot &&
+        !fs->loads.GetAny(Shader::IR::Attribute::SubgroupLtMask);
+    const bool wave32_fragment_supported =
+        instance.IsSubgroupSizeControlEnabled() && instance.MinSubgroupSize() <= 32 &&
+        instance.MaxSubgroupSize() >= 32 &&
+        bool(instance.RequiredSubgroupSizeStages() & vk::ShaderStageFlagBits::eFragment);
+    const bool wave32_fragment = try_wave32_fs && no_lane_ops && wave32_fragment_supported;
+    if (wave32_fragment) {
+        // Log only the first actual eligible pipeline, so enabling the flag
+        // cannot silently appear to have worked without using wave32.
+        static std::atomic_flag first_wave32 = ATOMIC_FLAG_INIT;
+        if (!first_wave32.test_and_set(std::memory_order_relaxed)) {
+            std::printf("GPU: TLG_FS_WAVE32=1 enabled on eligible fragment pipelines; "
+                        "first shader %016llx (requires driver validation)\n",
+                        static_cast<unsigned long long>(fs->pgm_hash));
+        }
+    }
     for (auto& stage : shader_stages) {
-        // tlg: a required subgroup size is only valid on the stages the driver lists in
-        // requiredSubgroupSizeStages; attaching it elsewhere is a spec violation (the driver may
-        // reject the pipeline or clamp the size, either way the shader runs at a size the wave64
-        // lowering did not assume).
-        stage.pNext = instance.IsRequiredSubgroupSize64ValidFor(stage.stage) ? &subgroup_size_ci
-                                                                            : nullptr;
+        if (stage.stage == vk::ShaderStageFlagBits::eFragment && wave32_fragment) {
+            stage.pNext = &subgroup_size_32;
+        } else {
+            stage.pNext = instance.IsRequiredSubgroupSize64ValidFor(stage.stage)
+                              ? &subgroup_size_ci
+                              : nullptr;
+        }
     }
 
     const auto depth_format =
