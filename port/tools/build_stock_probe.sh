@@ -23,6 +23,7 @@ for file in src/runtime*.c; do
 done
 runtime+=("$stock/runtime_thread.c" "$stock/runtime_sema.c")
 cc=$(command -v cc)
+if [[ -n "${CC:-}" ]]; then cc="$CC"; fi
 "$cc" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread -no-pie \
     ${includes[@]} -I. -Isrc -I"$stock" \
     src/probe.c ${runtime[@]} src/cpu_check.c src/vulkan_smoke.c \
