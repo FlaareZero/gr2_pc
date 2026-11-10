@@ -21,6 +21,9 @@ jobs:
           test "$(bash scripts/play_jirga_fast.sh --show-config native | grep '^TLG_UPSCALER=')" = "TLG_UPSCALER=off"
           test "$(bash scripts/play_jirga_fast.sh --show-config crowd | grep '^TLG_FRAMES_AHEAD=')" = "TLG_FRAMES_AHEAD=2"
           test "$(bash scripts/play_jirga_fast.sh --show-config crowd-direct | grep '^TLG_VK_RECORD_THREAD=')" = "TLG_VK_RECORD_THREAD=0"
+          test "$(bash scripts/play_jirga_fast.sh --show-config crowd-async | grep '^TLG_DEFERRED_READBACK=')" = "TLG_DEFERRED_READBACK=1"
+          test "$(bash scripts/play_jirga_fast.sh --show-config crowd-async | grep '^TLG_STALE_READBACK=')" = "TLG_STALE_READBACK=1"
+          test "$(bash scripts/play_jirga_fast.sh --show-config crowd | grep '^TLG_DEFERRED_READBACK=')" = "TLG_DEFERRED_READBACK=0"
           test "$(bash scripts/play_jirga_fast.sh --show-config native | grep '^TLG_FRAMES_AHEAD=')" = "TLG_FRAMES_AHEAD=1"
           python3 -m py_compile scripts/jirga_perf.py scripts/test_jirga_perf.py
           python3 -m unittest discover -s scripts -p test_jirga_perf.py -v
