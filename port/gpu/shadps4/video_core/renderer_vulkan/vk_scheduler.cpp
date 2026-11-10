@@ -416,6 +416,9 @@ void Scheduler::AllocateWorkerCommandBuffers() {
 
     current_cmdbuf = command_pool.Commit();
     Check(current_cmdbuf.begin(begin_info));
+    // Reset after the previous buffer's recorder has finished (SubmitExecution
+    // called SyncRecording first). Vulkan state never survives command buffers.
+    last_graphics_pipeline = vk::Pipeline{};
 
     // Invalidate dynamic state so it gets applied to the new command buffer.
     dynamic_state.Invalidate();
