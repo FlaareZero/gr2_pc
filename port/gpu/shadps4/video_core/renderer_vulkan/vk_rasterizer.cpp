@@ -1769,10 +1769,30 @@ void Rasterizer::EmitVertexBuffers() {
         v.bindings.size() * sizeof(v.bindings[0]) + v.attributes.size() * sizeof(v.attributes[0]) +
         num_buffers * (sizeof(vk::Buffer) + 3 * sizeof(vk::DeviceSize)) + 128);
     if (dynamic_input) {
-        scheduler.Record([bindings = scheduler.RecordData(std::span<const vk::VertexInputBindingDescription2EXT>{v.bindings.data(), v.bindings.size()}),
-                          attributes = scheduler.RecordData(std::span<const vk::VertexInputAttributeDescription2EXT>{
-                              v.attributes.data(), v.attributes.size()})](
-                             vk::CommandBuffer cmdbuf) {
+        const auto bindings = scheduler.RecordData(
+            std::span<const vk::VertexInputBindingDescription2EXT>{v.bindings.data(), v.bindings.size()});
+        const auto attributes = scheduler.RecordData(
+            std::span<const vk::VertexInputAttributeDescription2EXT>{v.attributes.data(), v.attributes.size()});
+        // Do not change Vulkan state or command ordering: simply coalesce the
+        // two consecutive recording closures for dynamic vertex input and
+        // vertex buffers. No guest draw is culled or reordered.
+        static const bool fused_draw_binds = [] {
+            const char* env = std::getenv("TLG_FUSED_DRAW_BINDS");
+            return env && env[0] == '1';
+        }();
+        if (fused_draw_binds && num_buffers != 0) {
+            const auto buffers = scheduler.RecordData(
+                std::span<const vk::Buffer>{v.host_buffers.data(), num_buffers});
+            const auto offsets = scheduler.RecordData(
+                std::span<const vk::DeviceSize>{v.host_offsets.data(), num_buffers});
+            scheduler.Record([bindings, attributes, buffers, offsets, num_buffers](
+                                 vk::CommandBuffer cmdbuf) {
+                cmdbuf.setVertexInputEXT(bindings, attributes);
+                cmdbuf.bindVertexBuffers(0, num_buffers, buffers.data(), offsets.data());
+            });
+            return;
+        }
+        scheduler.Record([bindings, attributes](vk::CommandBuffer cmdbuf) {
             cmdbuf.setVertexInputEXT(bindings, attributes);
         });
     }
