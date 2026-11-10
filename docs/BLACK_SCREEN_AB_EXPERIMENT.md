@@ -33,8 +33,9 @@ The script:
    each. All receive the same prepared image/content/patches and the same
    launcher-derived settings and game files, but separate fresh user
    directories and independent cold shader caches.
-4. Saves three run logs and a JSON report inside
-   port/out/ab-tests/YYYYMMDD-HHMMSS-PID/.
+4. Saves three run logs, linker resolution reports and a JSON summary inside
+   port/out/ab-tests/YYYYMMDD-HHMMSS-PID/, together with a small
+   diagnostics.zip containing only the report/logs, not game saves or caches.
 
 Do **not** remove or replace port/out/tlg-probe, port/user or the
 existing game directory. This comparison does not modify them.
@@ -75,8 +76,9 @@ These are hypotheses, not conclusions. Every run must be observed
 audio decoding and file read counters are supporting evidence only.
 
 When the experiment ends, record which variant visibly reached gameplay,
-then attach the generated summary.json and, if appropriate, the three
-run.log files in this conversation. Logs can contain user-specific paths,
+then attach the generated diagnostics.zip in this conversation. It contains
+summary.json and the three run.log files plus dynamic-library reports,
+but no save data or shader caches. Logs can contain user-specific paths,
 so review them before posting publicly.
 
 ## Scope and safeguards
