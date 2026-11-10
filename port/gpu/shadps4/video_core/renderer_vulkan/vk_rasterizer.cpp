@@ -1787,15 +1787,16 @@ void Rasterizer::EmitVertexBuffers() {
                 std::span<const vk::Buffer>{v.host_buffers.data(), num_buffers});
             const auto offsets = scheduler.RecordData(
                 std::span<const vk::DeviceSize>{v.host_offsets.data(), num_buffers});
-            scheduler.Record([bindings, attributes, buffers, offsets, num_buffers](
+            scheduler.Record([gpu_scheduler = &scheduler, bindings, attributes, buffers, offsets](
                                  vk::CommandBuffer cmdbuf) {
-                cmdbuf.setVertexInputEXT(bindings, attributes);
-                cmdbuf.bindVertexBuffers(0, num_buffers, buffers.data(), offsets.data());
+                gpu_scheduler->SetVertexInput(cmdbuf, bindings, attributes);
+                gpu_scheduler->BindVertexBuffers(cmdbuf, buffers, offsets);
             });
             return;
         }
-        scheduler.Record([bindings, attributes](vk::CommandBuffer cmdbuf) {
-            cmdbuf.setVertexInputEXT(bindings, attributes);
+        scheduler.Record([gpu_scheduler = &scheduler, bindings, attributes](
+                             vk::CommandBuffer cmdbuf) {
+            gpu_scheduler->SetVertexInput(cmdbuf, bindings, attributes);
         });
     }
     if (num_buffers == 0) {
@@ -1804,16 +1805,16 @@ void Rasterizer::EmitVertexBuffers() {
     const auto buffers = scheduler.RecordData(std::span<const vk::Buffer>{v.host_buffers.data(), num_buffers});
     const auto offsets = scheduler.RecordData(std::span<const vk::DeviceSize>{v.host_offsets.data(), num_buffers});
     if (dynamic_input) {
-        scheduler.Record([num_buffers, buffers, offsets](vk::CommandBuffer cmdbuf) {
-            cmdbuf.bindVertexBuffers(0, num_buffers, buffers.data(), offsets.data());
+        scheduler.Record([gpu_scheduler = &scheduler, buffers, offsets](vk::CommandBuffer cmdbuf) {
+            gpu_scheduler->BindVertexBuffers(cmdbuf, buffers, offsets);
         });
         return;
     }
     const auto sizes = scheduler.RecordData(std::span<const vk::DeviceSize>{v.host_sizes.data(), num_buffers});
     const auto strides = scheduler.RecordData(std::span<const vk::DeviceSize>{v.host_strides.data(), num_buffers});
-    scheduler.Record([num_buffers, buffers, offsets, sizes, strides](vk::CommandBuffer cmdbuf) {
-        cmdbuf.bindVertexBuffers2(0, num_buffers, buffers.data(), offsets.data(), sizes.data(),
-                                  strides.data());
+    scheduler.Record([gpu_scheduler = &scheduler, buffers, offsets, sizes, strides](
+                         vk::CommandBuffer cmdbuf) {
+        gpu_scheduler->BindVertexBuffers(cmdbuf, buffers, offsets, sizes, strides);
     });
 }
 
