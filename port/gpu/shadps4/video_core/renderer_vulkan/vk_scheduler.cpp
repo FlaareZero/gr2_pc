@@ -109,12 +109,17 @@ void Scheduler::BeginRendering(const RenderState& new_state) {
     };
 
     if (!recording_threaded) {
+        last_graphics_pipeline = vk::Pipeline{};
         current_cmdbuf.beginRendering(rendering_info);
         return;
     }
     // The attachment infos live on this stack frame: the recorded closure keeps copies.
-    Record([info = rendering_info, color_attachments, depth_attachment,
+    Record([this, info = rendering_info, color_attachments, depth_attachment,
             stencil_attachment](vk::CommandBuffer cmdbuf) mutable {
+        // A changed render scope is a conservative invalidation boundary.
+        // The cache never assumes a graphics pipeline bound by unrelated
+        // rendering code still matches the previous guest draw.
+        last_graphics_pipeline = vk::Pipeline{};
         info.pColorAttachments = color_attachments.data();
         if (info.pDepthAttachment) {
             info.pDepthAttachment = &depth_attachment;
