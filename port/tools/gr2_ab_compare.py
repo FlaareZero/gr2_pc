@@ -150,6 +150,19 @@ def run_variant(name, executable, run_dir, mod, settings, shared, seconds):
     env["LD_LIBRARY_PATH"] = os.pathsep.join(
         x for x in (str(bundled) if bundled.is_dir() else "", inherited) if x
     )
+    # Capture which host shared libraries each candidate really resolves to.
+    # This is often the key difference between the Fedora build and the CI package.
+    if shutil.which("ldd"):
+        for label, binary in (("probe", executable),
+                              ("gpu", executable.parent / "gpu" / "libtlggpu.so")):
+            try:
+                resolved = subprocess.run(["ldd", str(binary)], cwd=user, env=env,
+                                          capture_output=True, text=True, timeout=20)
+                (user / ("ldd_" + label + ".txt")).write_text(
+                    resolved.stdout + resolved.stderr, encoding="utf-8")
+            except (OSError, subprocess.TimeoutExpired) as error:
+                (user / ("ldd_" + label + ".txt")).write_text(
+                    "ldd failed: " + str(error) + "\n", encoding="utf-8")
     image, profile, patches = shared
     cmd = command(executable, image, profile, patches, settings["game_dir"],
                   user, seconds, mod.ISA_TABLE)
