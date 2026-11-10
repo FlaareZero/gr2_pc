@@ -1055,7 +1055,15 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
         }
     }
     EmitVertexBuffers();
-    if (is_indexed) {
+    // The index binding is only consumed by this draw. Optionally record it
+    // inside the existing draw closure rather than creating a separate
+    // command object for every indexed draw (~6k draws in crowded Jirga).
+    // This preserves its position after the per-draw resource barriers.
+    static const bool fused_draw_binds = [] {
+        const char* env = std::getenv("TLG_FUSED_DRAW_BINDS");
+        return env && env[0] == '1';
+    }();
+    if (is_indexed && !fused_draw_binds) {
         EmitIndexBuffer();
     }
 
@@ -1168,11 +1176,18 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
 
     const vk::Pipeline handle = pipeline->Handle();
     const vk::Pipeline square = SquarePass(*pipeline);
+    // Copy the resolved index binding: a later draw may overwrite index_bind
+    // before this deferred closure is executed on the recording thread.
+    const auto resolved_index = index_bind;
     const u32 num_indices = regs.num_indices;
     const u32 num_instances = regs.num_instances.NumInstances();
     const u32 first_vertex = vertex_offset;
     const u32 first_instance = instance_offset;
     scheduler.Record([=](vk::CommandBuffer cmdbuf) {
+        if (fused_draw_binds && is_indexed) {
+            cmdbuf.bindIndexBuffer(resolved_index.handle, resolved_index.offset,
+                                   resolved_index.type);
+        }
         const auto draw = [&] {
             if (is_indexed) {
                 cmdbuf.drawIndexed(num_indices, num_instances, 0, s32(first_vertex),
