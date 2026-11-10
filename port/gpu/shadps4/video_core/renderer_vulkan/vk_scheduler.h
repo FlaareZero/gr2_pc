@@ -729,7 +729,11 @@ public:
     // Recorder-thread-only: deduplicate identical Vulkan graphics and index bindings
     // within the same primary command buffer. Both are still emitted when the
     // command buffer changes or host rendering takes the raw command buffer.
-    void BindGraphicsPipeline(vk::CommandBuffer cmdbuf, vk::Pipeline pipeline);
+    // vertex_input_dynamic must be true ONLY if this pipeline was created with
+    // VK_DYNAMIC_STATE_VERTEX_INPUT_EXT. A static pipeline invalidates that
+    // dynamic state per Vulkan spec, even if the vertex layout values match.
+    void BindGraphicsPipeline(vk::CommandBuffer cmdbuf, vk::Pipeline pipeline,
+                              bool vertex_input_dynamic = false);
     void BindIndexBuffer(vk::CommandBuffer cmdbuf, vk::Buffer buffer, vk::DeviceSize offset,
                          vk::IndexType type);
     void SetVertexInput(vk::CommandBuffer cmdbuf,
