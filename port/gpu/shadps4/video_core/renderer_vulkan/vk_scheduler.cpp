@@ -53,13 +53,22 @@ Scheduler::Scheduler(const Instance& instance, bool threaded_recording)
         std::jthread(std::bind_front(&Scheduler::PriorityPendingOpsThread, this));
 }
 
-void Scheduler::BindGraphicsPipeline(vk::CommandBuffer cmdbuf, vk::Pipeline pipeline) {
+void Scheduler::BindGraphicsPipeline(vk::CommandBuffer cmdbuf, vk::Pipeline pipeline,
+                                     bool vertex_input_dynamic) {
     if (draw_bind_stats_enabled) {
         ++draw_pipeline_binds;
     }
     if (draw_bind_memo_enabled && last_graphics_pipeline == pipeline) {
         if (draw_bind_stats_enabled) ++draw_pipeline_skips;
         return;
+    }
+    // Vulkan invalidates a dynamic state's prior values when binding a
+    // graphics pipeline which specifies it as static. The host depth resample
+    // pass uses static vertex inputs; guest pipelines use dynamic inputs on
+    // supported hardware. Skip a later vkCmdSetVertexInputEXT only when the
+    // last static-state bind has not invalidated it.
+    if (!vertex_input_dynamic) {
+        vertex_input_valid = false;
     }
     cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline);
     last_graphics_pipeline = pipeline;
