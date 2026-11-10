@@ -265,6 +265,11 @@ private:
         const void* backing = nullptr;
         VideoCore::SubresourceRange range;
         bool proxy = false; ///< sampled from the scene proxy (view: SampleProxy on each use)
+        // An image may survive unrelated texture registrations. A unique image UID
+        // guards against freed/recycled ImageId slots; exact_original means the
+        // source descriptor matched a registered native image, not an overlap view.
+        u64 image_uid = 0;
+        bool exact_original = false;
     };
     struct TextureSet {
         u64 key = 0;
@@ -278,6 +283,7 @@ private:
     };
     std::array<TextureSet, 32768> texture_sets{};
     u64 texture_set_hits = 0, texture_set_misses = 0;
+    u64 texture_set_cross_generation_hits = 0;
     std::array<u64, 4> texture_set_why{}; ///< misses: other key, generation, image check, new
     /// Returns true when the stage's images were bound from the memo.
     bool BindTexturesFromSet(const Shader::Info& stage, const PreparedStage* prepared,
