@@ -469,7 +469,7 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
             // executed before we read the cumulative value.
             SyncRecording();
             std::printf("GPU draw bind cache: %llu redundant graphics pipeline binds skipped "
-                        "(%u submissions)\\n",
+                        "(%u submissions)\n",
                         static_cast<unsigned long long>(SkippedGraphicsPipelineBinds()),
                         submitted);
         }
