@@ -55,6 +55,11 @@ struct Profile {
     bool needs_unorm_fixup{};
     bool needs_clip_distance_emulation{};
     bool supports_shader_stencil_export{};
+    // Experimental exact arithmetic common-subexpression elimination for
+    // graphics shaders. Included in the cache profile to invalidate stale
+    // SPIR-V modules whenever an A/B toggle changes.
+    bool graphics_cse_vertex{};
+    bool graphics_cse_fragment{};
 
     bool operator==(const Profile&) const = default;
 };

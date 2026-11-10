@@ -619,8 +619,11 @@ public:
     void Execute(vk::CommandBuffer cmdbuf) {
         for (CommandBase* command = first; command;) {
             CommandBase* const next = command->next;
-            command->Execute(cmdbuf);
-            command->~CommandBase();
+            // One type-erased thunk both executes and destroys the closure.
+            // The old virtual Execute + virtual destructor required two
+            // vtable calls per recorded Vulkan command (~tens of thousands
+            // of commands per busy frame).
+            command->execute_and_destroy(command, cmdbuf);
             command = next;
         }
         first = last = nullptr;
@@ -647,16 +650,18 @@ private:
     }
 
     struct CommandBase {
-        virtual ~CommandBase() = default;
-        virtual void Execute(vk::CommandBuffer cmdbuf) = 0;
         CommandBase* next{};
+        void (*execute_and_destroy)(CommandBase*, vk::CommandBuffer){};
     };
     template <typename Func>
     struct TypedCommand final : CommandBase {
-        explicit TypedCommand(Func&& func_) : func{std::move(func_)} {}
-        explicit TypedCommand(const Func& func_) : func{func_} {}
-        void Execute(vk::CommandBuffer cmdbuf) override {
-            func(cmdbuf);
+        explicit TypedCommand(Func&& func_) : CommandBase{nullptr, &Run}, func{std::move(func_)} {}
+        explicit TypedCommand(const Func& func_) : CommandBase{nullptr, &Run}, func{func_} {}
+
+        static void Run(CommandBase* base, vk::CommandBuffer cmdbuf) {
+            auto* command = static_cast<TypedCommand*>(base);
+            command->func(cmdbuf);
+            command->~TypedCommand();
         }
         Func func;
     };
@@ -695,6 +700,21 @@ public:
 
     /// Attempts to execute operations whose tick the GPU has caught up with.
     void PopPendingOperations();
+
+    /// GPU command-stream state deduplication, executed only on the Vulkan
+    /// recorder thread (or on the caller in direct-recording mode). Vulkan
+    /// calls are omitted *only* when state matches exactly inside a render scope.
+    /// This never changes the number or order of guest draw commands.
+    void BindGraphicsPipeline(vk::CommandBuffer cmdbuf, vk::Pipeline pipeline);
+    void BindIndexBuffer(vk::CommandBuffer cmdbuf, vk::Buffer buffer, vk::DeviceSize offset,
+                         vk::IndexType type);
+    void SetVertexInput(vk::CommandBuffer cmdbuf,
+                        std::span<const vk::VertexInputBindingDescription2EXT> bindings,
+                        std::span<const vk::VertexInputAttributeDescription2EXT> attributes);
+    void BindVertexBuffers(vk::CommandBuffer cmdbuf, std::span<const vk::Buffer> buffers,
+                           std::span<const vk::DeviceSize> offsets,
+                           std::span<const vk::DeviceSize> sizes = {},
+                           std::span<const vk::DeviceSize> strides = {});
 
     /// Starts a new rendering scope with provided state.
     void BeginRendering(const RenderState& new_state);
@@ -738,6 +758,9 @@ public:
             direct_recordings.fetch_add(1, std::memory_order_relaxed);
             TraceDirectRecording(__builtin_return_address(0));
         }
+        // A raw caller is free to change *any* graphics bind state. The
+        // recorder has been drained above, so this invalidation is ordered.
+        ResetGraphicsBindCache();
         return current_cmdbuf;
     }
 
@@ -910,6 +933,13 @@ public:
     }
 
 private:
+    void ResetGraphicsBindCache() noexcept {
+        cached_graphics_pipeline = vk::Pipeline{};
+        cached_index_valid = false;
+        cached_vertex_input_valid = false;
+        cached_vertex_buffers_valid = false;
+    }
+
     void AllocateWorkerCommandBuffers();
 
     std::unique_ptr<RecordChunk> AcquireChunk();
@@ -925,6 +955,24 @@ private:
     Semaphore work_semaphore;
     CommandPool command_pool;
     DynamicState dynamic_state;
+    // Only the active Vulkan command-buffer recording thread accesses these.
+    // Reset on begin/end rendering, raw command-buffer access and new buffers.
+    vk::Pipeline cached_graphics_pipeline{};
+    vk::Buffer cached_index_buffer{};
+    vk::DeviceSize cached_index_offset{};
+    vk::IndexType cached_index_type{};
+    bool cached_index_valid = false;
+    std::vector<vk::VertexInputBindingDescription2EXT> cached_vertex_bindings;
+    std::vector<vk::VertexInputAttributeDescription2EXT> cached_vertex_attributes;
+    bool cached_vertex_input_valid = false;
+    std::vector<vk::Buffer> cached_vertex_buffers;
+    std::vector<vk::DeviceSize> cached_vertex_offsets;
+    std::vector<vk::DeviceSize> cached_vertex_sizes;
+    std::vector<vk::DeviceSize> cached_vertex_strides;
+    bool cached_vertex_buffers_valid = false;
+    u64 gpu_binds_issued = 0;
+    u64 gpu_binds_skipped = 0;
+    u32 gpu_bind_log_submissions = 0;
     SubmitFunc on_submit{};
     vk::CommandBuffer current_cmdbuf;
     std::condition_variable_any event_cv;

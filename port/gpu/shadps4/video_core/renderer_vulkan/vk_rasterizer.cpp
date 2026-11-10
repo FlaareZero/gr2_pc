@@ -1055,7 +1055,15 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
         }
     }
     EmitVertexBuffers();
-    if (is_indexed) {
+    // The index binding is only consumed by this draw. Optionally record it
+    // inside the existing draw closure rather than creating a separate
+    // command object for every indexed draw (~6k draws in crowded Jirga).
+    // This preserves its position after the per-draw resource barriers.
+    static const bool fused_draw_binds = [] {
+        const char* env = std::getenv("TLG_FUSED_DRAW_BINDS");
+        return env && env[0] == '1';
+    }();
+    if (is_indexed && !fused_draw_binds) {
         EmitIndexBuffer();
     }
 
@@ -1168,11 +1176,19 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
 
     const vk::Pipeline handle = pipeline->Handle();
     const vk::Pipeline square = SquarePass(*pipeline);
+    Scheduler* const gpu_scheduler = &scheduler;
+    // Copy the resolved index binding: a later draw may overwrite index_bind
+    // before this deferred closure is executed on the recording thread.
+    const auto resolved_index = index_bind;
     const u32 num_indices = regs.num_indices;
     const u32 num_instances = regs.num_instances.NumInstances();
     const u32 first_vertex = vertex_offset;
     const u32 first_instance = instance_offset;
     scheduler.Record([=](vk::CommandBuffer cmdbuf) {
+        if (fused_draw_binds && is_indexed) {
+            gpu_scheduler->BindIndexBuffer(cmdbuf, resolved_index.handle, resolved_index.offset,
+                                           resolved_index.type);
+        }
         const auto draw = [&] {
             if (is_indexed) {
                 cmdbuf.drawIndexed(num_indices, num_instances, 0, s32(first_vertex),
@@ -1181,10 +1197,10 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
                 cmdbuf.draw(num_indices, num_instances, first_vertex, first_instance);
             }
         };
-        cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, handle);
+        gpu_scheduler->BindGraphicsPipeline(cmdbuf, handle);
         draw();
         if (square) [[unlikely]] {
-            cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, square);
+            gpu_scheduler->BindGraphicsPipeline(cmdbuf, square);
             draw();
         }
     });
@@ -1313,6 +1329,7 @@ void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_in
                                  : sizeof(VkDrawIndirectCommand)));
     const vk::Pipeline handle = pipeline->Handle();
     const vk::Pipeline square = SquarePass(*pipeline);
+    Scheduler* const gpu_scheduler = &scheduler;
     const vk::Buffer args = buffer->Handle();
     const u64 args_offset = base;
     const vk::Buffer counts = count_address != 0 ? count_buffer->Handle() : vk::Buffer{};
@@ -1322,7 +1339,7 @@ void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_in
             if (!bound) {
                 break;
             }
-            cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, bound);
+            gpu_scheduler->BindGraphicsPipeline(cmdbuf, bound);
             if (is_indexed) {
                 if (counts) {
                     cmdbuf.drawIndexedIndirectCount(args, args_offset, counts, counts_offset, max_count,
@@ -1754,11 +1771,32 @@ void Rasterizer::EmitVertexBuffers() {
         v.bindings.size() * sizeof(v.bindings[0]) + v.attributes.size() * sizeof(v.attributes[0]) +
         num_buffers * (sizeof(vk::Buffer) + 3 * sizeof(vk::DeviceSize)) + 128);
     if (dynamic_input) {
-        scheduler.Record([bindings = scheduler.RecordData(std::span<const vk::VertexInputBindingDescription2EXT>{v.bindings.data(), v.bindings.size()}),
-                          attributes = scheduler.RecordData(std::span<const vk::VertexInputAttributeDescription2EXT>{
-                              v.attributes.data(), v.attributes.size()})](
+        const auto bindings = scheduler.RecordData(
+            std::span<const vk::VertexInputBindingDescription2EXT>{v.bindings.data(), v.bindings.size()});
+        const auto attributes = scheduler.RecordData(
+            std::span<const vk::VertexInputAttributeDescription2EXT>{v.attributes.data(), v.attributes.size()});
+        // Do not change Vulkan state or command ordering: simply coalesce the
+        // two consecutive recording closures for dynamic vertex input and
+        // vertex buffers. No guest draw is culled or reordered.
+        static const bool fused_draw_binds = [] {
+            const char* env = std::getenv("TLG_FUSED_DRAW_BINDS");
+            return env && env[0] == '1';
+        }();
+        if (fused_draw_binds && num_buffers != 0) {
+            const auto buffers = scheduler.RecordData(
+                std::span<const vk::Buffer>{v.host_buffers.data(), num_buffers});
+            const auto offsets = scheduler.RecordData(
+                std::span<const vk::DeviceSize>{v.host_offsets.data(), num_buffers});
+            scheduler.Record([gpu_scheduler = &scheduler, bindings, attributes, buffers, offsets](
+                                 vk::CommandBuffer cmdbuf) {
+                gpu_scheduler->SetVertexInput(cmdbuf, bindings, attributes);
+                gpu_scheduler->BindVertexBuffers(cmdbuf, buffers, offsets);
+            });
+            return;
+        }
+        scheduler.Record([gpu_scheduler = &scheduler, bindings, attributes](
                              vk::CommandBuffer cmdbuf) {
-            cmdbuf.setVertexInputEXT(bindings, attributes);
+            gpu_scheduler->SetVertexInput(cmdbuf, bindings, attributes);
         });
     }
     if (num_buffers == 0) {
@@ -1767,16 +1805,16 @@ void Rasterizer::EmitVertexBuffers() {
     const auto buffers = scheduler.RecordData(std::span<const vk::Buffer>{v.host_buffers.data(), num_buffers});
     const auto offsets = scheduler.RecordData(std::span<const vk::DeviceSize>{v.host_offsets.data(), num_buffers});
     if (dynamic_input) {
-        scheduler.Record([num_buffers, buffers, offsets](vk::CommandBuffer cmdbuf) {
-            cmdbuf.bindVertexBuffers(0, num_buffers, buffers.data(), offsets.data());
+        scheduler.Record([gpu_scheduler = &scheduler, buffers, offsets](vk::CommandBuffer cmdbuf) {
+            gpu_scheduler->BindVertexBuffers(cmdbuf, buffers, offsets);
         });
         return;
     }
     const auto sizes = scheduler.RecordData(std::span<const vk::DeviceSize>{v.host_sizes.data(), num_buffers});
     const auto strides = scheduler.RecordData(std::span<const vk::DeviceSize>{v.host_strides.data(), num_buffers});
-    scheduler.Record([num_buffers, buffers, offsets, sizes, strides](vk::CommandBuffer cmdbuf) {
-        cmdbuf.bindVertexBuffers2(0, num_buffers, buffers.data(), offsets.data(), sizes.data(),
-                                  strides.data());
+    scheduler.Record([gpu_scheduler = &scheduler, buffers, offsets, sizes, strides](
+                         vk::CommandBuffer cmdbuf) {
+        gpu_scheduler->BindVertexBuffers(cmdbuf, buffers, offsets, sizes, strides);
     });
 }
 
@@ -1924,9 +1962,9 @@ void Rasterizer::BindIndexBuffer(u32 index_offset) {
 }
 
 void Rasterizer::EmitIndexBuffer() {
-    scheduler.Record([handle = index_bind.handle, offset = index_bind.offset,
-                      type = index_bind.type](vk::CommandBuffer cmdbuf) {
-        cmdbuf.bindIndexBuffer(handle, offset, type);
+    scheduler.Record([gpu_scheduler = &scheduler, handle = index_bind.handle,
+                      offset = index_bind.offset, type = index_bind.type](vk::CommandBuffer cmdbuf) {
+        gpu_scheduler->BindIndexBuffer(cmdbuf, handle, offset, type);
     });
 }
 
@@ -1957,10 +1995,29 @@ void Rasterizer::ResetBindings(bool is_compute) {
     for (auto& image_id : bound_images) {
         texture_cache.GetImage(image_id).binding = {};
     }
+    // The original code marked every graphics buffer access as ALL_GRAPHICS,
+    // even fixed-function index/vertex fetches. This widens subsequent WAR
+    // execution dependencies and can stall unrelated stages of the GPU.
+    // Only narrow access types with an unambiguous Vulkan pipeline stage;
+    // shader buffers retain the conservative original stage mask.
+    // TLG_PRECISE_BUFFER_STAGES=0 restores the exact old masks for A/B.
+    static const bool precise_stages = [] {
+        const char* env = std::getenv("TLG_PRECISE_BUFFER_STAGES");
+        return !(env && env[0] == '0');
+    }();
     for (const auto [buffer, offset, size, src_access] : bound_buffers) {
-        const auto dst_stage = is_compute ? vk::PipelineStageFlagBits2::eComputeShader
-                                          : vk::PipelineStageFlagBits2::eAllGraphics;
-        runtime.AccessBuffer(buffer, offset, size, dst_stage, src_access);
+        vk::PipelineStageFlags2 stage = is_compute ? vk::PipelineStageFlagBits2::eComputeShader
+                                                   : vk::PipelineStageFlagBits2::eAllGraphics;
+        if (precise_stages) {
+            if (src_access == vk::AccessFlagBits2::eIndexRead) {
+                stage = vk::PipelineStageFlagBits2::eIndexInput;
+            } else if (src_access == vk::AccessFlagBits2::eVertexAttributeRead) {
+                stage = vk::PipelineStageFlagBits2::eVertexAttributeInput;
+            } else if (src_access == vk::AccessFlagBits2::eIndirectCommandRead) {
+                stage = vk::PipelineStageFlagBits2::eDrawIndirect;
+            }
+        }
+        runtime.AccessBuffer(buffer, offset, size, stage, src_access);
     }
     bound_images.clear();
     bound_buffers.clear();

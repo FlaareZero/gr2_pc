@@ -56,6 +56,114 @@ Scheduler::~Scheduler() {
 #endif
 }
 
+void Scheduler::BindGraphicsPipeline(vk::CommandBuffer cmdbuf, vk::Pipeline pipeline) {
+    static const bool enabled = [] {
+        const char* e = std::getenv("TLG_GPU_BIND_DEDUP");
+        return e && e[0] == '1' && e[1] == '\0';
+    }();
+    if (enabled && cached_graphics_pipeline == pipeline) {
+        ++gpu_binds_skipped;
+        return;
+    }
+    cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline);
+    ++gpu_binds_issued;
+    if (enabled) cached_graphics_pipeline = pipeline;
+}
+
+void Scheduler::BindIndexBuffer(vk::CommandBuffer cmdbuf, vk::Buffer buffer,
+                                vk::DeviceSize offset, vk::IndexType type) {
+    static const bool enabled = [] {
+        const char* e = std::getenv("TLG_GPU_BIND_DEDUP");
+        return e && e[0] == '1' && e[1] == '\0';
+    }();
+    if (enabled && cached_index_valid && cached_index_buffer == buffer &&
+        cached_index_offset == offset && cached_index_type == type) {
+        ++gpu_binds_skipped;
+        return;
+    }
+    cmdbuf.bindIndexBuffer(buffer, offset, type);
+    ++gpu_binds_issued;
+    if (enabled) {
+        cached_index_buffer = buffer;
+        cached_index_offset = offset;
+        cached_index_type = type;
+        cached_index_valid = true;
+    }
+}
+
+// Compare the exact recorded Vulkan state, not a guest shader hash. Memcmp
+// is conservative if the Vulkan-Hpp structs contain padding: false negatives
+// merely emit the original command, never skip a different semantic state.
+template <typename T>
+static bool SameRecordedItems(const std::vector<T>& old, std::span<const T> next) {
+    return old.size() == next.size() &&
+           (next.empty() || std::memcmp(old.data(), next.data(), next.size_bytes()) == 0);
+}
+
+void Scheduler::SetVertexInput(
+    vk::CommandBuffer cmdbuf,
+    std::span<const vk::VertexInputBindingDescription2EXT> bindings,
+    std::span<const vk::VertexInputAttributeDescription2EXT> attributes) {
+    static const bool enabled = [] {
+        const char* e = std::getenv("TLG_GPU_BIND_DEDUP");
+        return e && e[0] == '1' && e[1] == '\0';
+    }();
+    // Chained pNext payloads might change behind an unchanged pointer. We
+    // cannot compare them as value objects, so exclude that case entirely.
+    const bool simple = std::ranges::all_of(bindings, [](const auto& v) { return !v.pNext; }) &&
+                        std::ranges::all_of(attributes, [](const auto& v) { return !v.pNext; });
+    if (enabled && simple && cached_vertex_input_valid &&
+        SameRecordedItems(cached_vertex_bindings, bindings) &&
+        SameRecordedItems(cached_vertex_attributes, attributes)) {
+        ++gpu_binds_skipped;
+        return;
+    }
+    cmdbuf.setVertexInputEXT(bindings, attributes);
+    ++gpu_binds_issued;
+    if (enabled) {
+        cached_vertex_input_valid = simple;
+        if (simple) {
+            cached_vertex_bindings.assign(bindings.begin(), bindings.end());
+            cached_vertex_attributes.assign(attributes.begin(), attributes.end());
+        }
+    }
+}
+
+void Scheduler::BindVertexBuffers(vk::CommandBuffer cmdbuf,
+                                   std::span<const vk::Buffer> buffers,
+                                   std::span<const vk::DeviceSize> offsets,
+                                   std::span<const vk::DeviceSize> sizes,
+                                   std::span<const vk::DeviceSize> strides) {
+    static const bool enabled = [] {
+        const char* e = std::getenv("TLG_GPU_BIND_DEDUP");
+        return e && e[0] == '1' && e[1] == '\0';
+    }();
+    const bool extended = !sizes.empty() || !strides.empty();
+    if (enabled && cached_vertex_buffers_valid &&
+        SameRecordedItems(cached_vertex_buffers, buffers) &&
+        SameRecordedItems(cached_vertex_offsets, offsets) &&
+        SameRecordedItems(cached_vertex_sizes, sizes) &&
+        SameRecordedItems(cached_vertex_strides, strides)) {
+        ++gpu_binds_skipped;
+        return;
+    }
+    if (extended) {
+        cmdbuf.bindVertexBuffers2(0, static_cast<u32>(buffers.size()), buffers.data(),
+                                  offsets.data(), sizes.data(), strides.data());
+    } else {
+        cmdbuf.bindVertexBuffers(0, static_cast<u32>(buffers.size()),
+                                 buffers.data(), offsets.data());
+    }
+    ++gpu_binds_issued;
+    if (enabled) {
+        cached_vertex_buffers.assign(buffers.begin(), buffers.end());
+        cached_vertex_offsets.assign(offsets.begin(), offsets.end());
+        cached_vertex_sizes.assign(sizes.begin(), sizes.end());
+        cached_vertex_strides.assign(strides.begin(), strides.end());
+        cached_vertex_buffers_valid = true;
+    }
+}
+
 void Scheduler::BeginRendering(const RenderState& new_state) {
     if (is_rendering && render_state == new_state) {
         return;
@@ -109,11 +217,12 @@ void Scheduler::BeginRendering(const RenderState& new_state) {
     };
 
     if (!recording_threaded) {
+        ResetGraphicsBindCache();
         current_cmdbuf.beginRendering(rendering_info);
         return;
     }
     // The attachment infos live on this stack frame: the recorded closure keeps copies.
-    Record([info = rendering_info, color_attachments, depth_attachment,
+    Record([this, info = rendering_info, color_attachments, depth_attachment,
             stencil_attachment](vk::CommandBuffer cmdbuf) mutable {
         info.pColorAttachments = color_attachments.data();
         if (info.pDepthAttachment) {
@@ -122,6 +231,7 @@ void Scheduler::BeginRendering(const RenderState& new_state) {
         if (info.pStencilAttachment) {
             info.pStencilAttachment = &stencil_attachment;
         }
+        ResetGraphicsBindCache();
         cmdbuf.beginRendering(info);
     });
 }
@@ -136,7 +246,10 @@ void Scheduler::EndRendering() {
         return;
     }
     is_rendering = false;
-    Record([](vk::CommandBuffer cmdbuf) { cmdbuf.endRendering(); });
+    Record([this](vk::CommandBuffer cmdbuf) {
+        cmdbuf.endRendering();
+        ResetGraphicsBindCache();
+    });
 }
 
 void Scheduler::TraceDirectRecording(void* caller) {
@@ -238,8 +351,23 @@ void Scheduler::KickRecording(bool force) {
     CheckOwner(__builtin_return_address(0));
     // Callers kick where nobody holds the raw command buffer: deferral resumes.
     direct_mode = false;
-    // Batches of tens of KiB keep the queue handoff cheap relative to the work it carries.
-    if (!force && full_chunks.empty() && record_chunk->Size() < 32 * 1024) {
+    // On CPUs with >=12 hardware threads (including the 7735U), larger batches
+    // amortize the recorder mutex, queue transfers, and worker wakeups across
+    // the thousands of Vulkan commands produced by crowded scenes.
+    // The 128 KiB command chunks still preserve order and all sync points
+    // force a flush. TLG_RECORD_BATCH_KB=32 restores the original behavior.
+    static const size_t batch_bytes = [] {
+        const size_t default_kib = TlgThreads::SizingCount() >= 12 ? 64 : 32;
+        if (const char* raw = std::getenv("TLG_RECORD_BATCH_KB"); raw && raw[0]) {
+            char* end = nullptr;
+            const unsigned long parsed = std::strtoul(raw, &end, 10);
+            if (end != raw && *end == '\0' && parsed >= 16 && parsed <= 96) {
+                return size_t(parsed) * 1024;
+            }
+        }
+        return default_kib * 1024;
+    }();
+    if (!force && full_chunks.empty() && record_chunk->Size() < batch_bytes) {
         return;
     }
     if (full_chunks.empty() && record_chunk->Empty()) {
@@ -400,6 +528,7 @@ void Scheduler::AllocateWorkerCommandBuffers() {
     };
 
     current_cmdbuf = command_pool.Commit();
+    ResetGraphicsBindCache();
     Check(current_cmdbuf.begin(begin_info));
 
     // Invalidate dynamic state so it gets applied to the new command buffer.
@@ -437,6 +566,21 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
         profiler->Mark(0x5B317ull, [] { return std::string{"(between submissions: GPU idle)"}; });
     }
     SyncRecording();
+    // Sample only after the recording worker has finished all prior commands.
+    // The counters correspond to real Vulkan commands *not* emitted when the
+    // experiment is enabled, unlike a mere recorder-closure optimization.
+    static const bool report_gpu_binds = [] {
+        const char* e = std::getenv("TLG_GPU_BIND_DEDUP");
+        return e && e[0] == '1' && e[1] == '\0';
+    }();
+    if (report_gpu_binds && ++gpu_bind_log_submissions >= 256) {
+        std::printf("GPU bind dedup (256 submissions): emitted %llu, skipped %llu redundant "
+                    "pipeline/index binds\n",
+                    static_cast<unsigned long long>(gpu_binds_issued),
+                    static_cast<unsigned long long>(gpu_binds_skipped));
+        gpu_binds_issued = gpu_binds_skipped = 0;
+        gpu_bind_log_submissions = 0;
+    }
     // Guest memory copies into staging read by this submission (copy threads).
     WaitHostCopies();
     Check(current_cmdbuf.end());
