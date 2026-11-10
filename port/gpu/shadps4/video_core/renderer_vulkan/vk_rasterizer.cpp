@@ -1196,10 +1196,10 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
                 cmdbuf.draw(num_indices, num_instances, first_vertex, first_instance);
             }
         };
-        cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, handle);
+        scheduler.BindGraphicsPipeline(cmdbuf, handle);
         draw();
         if (square) [[unlikely]] {
-            cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, square);
+            scheduler.BindGraphicsPipeline(cmdbuf, square);
             draw();
         }
     });
@@ -1337,7 +1337,7 @@ void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_in
             if (!bound) {
                 break;
             }
-            cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, bound);
+            scheduler.BindGraphicsPipeline(cmdbuf, bound);
             if (is_indexed) {
                 if (counts) {
                     cmdbuf.drawIndexedIndirectCount(args, args_offset, counts, counts_offset, max_count,
