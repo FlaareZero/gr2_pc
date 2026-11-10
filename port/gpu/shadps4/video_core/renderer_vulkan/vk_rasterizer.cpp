@@ -1756,9 +1756,9 @@ void Rasterizer::EmitVertexBuffers() {
     if (dynamic_input) {
         scheduler.Record([bindings = scheduler.RecordData(std::span<const vk::VertexInputBindingDescription2EXT>{v.bindings.data(), v.bindings.size()}),
                           attributes = scheduler.RecordData(std::span<const vk::VertexInputAttributeDescription2EXT>{
-                              v.attributes.data(), v.attributes.size()})](
-                             vk::CommandBuffer cmdbuf) {
-            cmdbuf.setVertexInputEXT(bindings, attributes);
+                              v.attributes.data(), v.attributes.size()}),
+                          recorder = &scheduler](vk::CommandBuffer cmdbuf) {
+            recorder->SetVertexInput(cmdbuf, bindings, attributes);
         });
     }
     if (num_buffers == 0) {
