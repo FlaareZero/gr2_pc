@@ -619,8 +619,11 @@ public:
     void Execute(vk::CommandBuffer cmdbuf) {
         for (CommandBase* command = first; command;) {
             CommandBase* const next = command->next;
-            command->Execute(cmdbuf);
-            command->~CommandBase();
+            // One type-erased thunk both executes and destroys the closure.
+            // The old virtual Execute + virtual destructor required two
+            // vtable calls per recorded Vulkan command (~tens of thousands
+            // of commands per busy frame).
+            command->execute_and_destroy(command, cmdbuf);
             command = next;
         }
         first = last = nullptr;
@@ -647,16 +650,18 @@ private:
     }
 
     struct CommandBase {
-        virtual ~CommandBase() = default;
-        virtual void Execute(vk::CommandBuffer cmdbuf) = 0;
         CommandBase* next{};
+        void (*execute_and_destroy)(CommandBase*, vk::CommandBuffer){};
     };
     template <typename Func>
     struct TypedCommand final : CommandBase {
-        explicit TypedCommand(Func&& func_) : func{std::move(func_)} {}
-        explicit TypedCommand(const Func& func_) : func{func_} {}
-        void Execute(vk::CommandBuffer cmdbuf) override {
-            func(cmdbuf);
+        explicit TypedCommand(Func&& func_) : CommandBase{nullptr, &Run}, func{std::move(func_)} {}
+        explicit TypedCommand(const Func& func_) : CommandBase{nullptr, &Run}, func{func_} {}
+
+        static void Run(CommandBase* base, vk::CommandBuffer cmdbuf) {
+            auto* command = static_cast<TypedCommand*>(base);
+            command->func(cmdbuf);
+            command->~TypedCommand();
         }
         Func func;
     };
@@ -743,6 +748,29 @@ public:
 
     /// TLG_RECORDER_TRACE=1: prints the most frequent CommandBuffer() callers every 2000 calls.
     static void TraceDirectRecording(void* caller);
+
+    /// GPU-driver hot path. Cache the last graphics pipeline bound to the *current*
+    /// command buffer, so identical consecutive draw pipelines do not produce
+    /// redundant vkCmdBindPipeline packets. Called exclusively in command-recording
+    /// order (on recorder or directly after SyncRecording), never during capture.
+    /// TLG_GPU_BIND_CACHE=0 retains the original Vulkan commands.
+    void BindGraphicsPipeline(vk::CommandBuffer cmdbuf, vk::Pipeline pipeline) {
+        static const bool enable = [] {
+            const char* env = std::getenv("TLG_GPU_BIND_CACHE");
+            return env && env[0] == '1' && env[1] == '\0';
+        }();
+        if (enable && last_graphics_pipeline == pipeline) {
+            skipped_graphics_pipeline_binds.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+        cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline);
+        last_graphics_pipeline = pipeline;
+    }
+
+    /// Number of vkCmdBindPipeline packets actually skipped on this build.
+    [[nodiscard]] u64 SkippedGraphicsPipelineBinds() const {
+        return skipped_graphics_pipeline_binds.load(std::memory_order_relaxed);
+    }
 
     /// Records `func(vk::CommandBuffer)` in order with other commands. The closure must own
     /// everything it uses (capture by value): it may run later on the recording thread.
@@ -927,6 +955,10 @@ private:
     DynamicState dynamic_state;
     SubmitFunc on_submit{};
     vk::CommandBuffer current_cmdbuf;
+    // Owned by the command-recording thread, but reset after SyncRecording()
+    // when a command buffer changes. Never read/write concurrently.
+    vk::Pipeline last_graphics_pipeline{};
+    std::atomic<u64> skipped_graphics_pipeline_binds{0};
     std::condition_variable_any event_cv;
     struct PendingOp {
         Common::UniqueFunction<void> callback;
