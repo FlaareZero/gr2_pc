@@ -306,7 +306,9 @@ bool AvPlayerSource::Stop() {
     std::unique_lock lock(m_state_mutex);
 
     if (!HasRunningThreads()) {
-        LOG_WARNING(Lib_AvPlayer, "Could not stop playback: already stopped.");
+        // Stop can be called more than once (including from ~AvPlayerSource).
+        // Preserve the failure return value expected by the guest API but
+        // avoid reporting harmless repeated cleanup as a runtime warning.
         return false;
     }
 
@@ -618,12 +620,16 @@ void AvPlayerSource::DemuxerThread(std::stop_token stop) {
     m_video_buffers_cv.Notify();
     m_audio_buffers_cv.Notify();
 
-    m_video_decoder_thread.Join();
-    m_audio_decoder_thread.Join();
-    m_state.OnEOF();
+    // Wait for outstanding decode callbacks to finish before reporting EOF.
+    // Their std::jthread objects are joined/detached ONLY by Source::Stop()
+    // under m_state_mutex; joining here races a concurrent guest Stop().
+    m_video_decoder_thread.WaitForFinished();
+    m_audio_decoder_thread.WaitForFinished();
+    if (!stop.stop_requested()) {
+        m_state.OnEOF();
+    }
 
     LOG_INFO(Lib_AvPlayer, "Demuxer Thread exited normally");
-    m_demuxer_thread.Join();
 }
 
 AvPlayerSource::AVFramePtr AvPlayerSource::ConvertVideoFrame(const AVFrame& frame) {
@@ -726,7 +732,12 @@ void AvPlayerSource::VideoDecoderThread(std::stop_token stop) {
     LOG_INFO(Lib_AvPlayer, "Video Decoder Thread started");
     while ((!m_is_eof || m_video_packets.Size() != 0) && !stop.stop_requested()) {
         if (m_video_packets.Size() == 0 &&
-            !m_video_packets_cv.Wait(stop, [this] { return m_video_packets.Size() != 0; })) {
+            !m_video_packets_cv.Wait(stop, [this] {
+                // An EOF with an empty packet queue must wake the decoder so
+                // the outer loop can finish; otherwise the demuxer deadlocks
+                // waiting for this callback even after Notify().
+                return m_video_packets.Size() != 0 || m_is_eof.load();
+            })) {
             continue;
         }
         const auto packet = m_video_packets.Pop();
@@ -781,7 +792,7 @@ void AvPlayerSource::VideoDecoderThread(std::stop_token stop) {
     }
 
     LOG_INFO(Lib_AvPlayer, "Video Decoder Thread exited normally");
-    m_video_decoder_thread.Join();
+    // The owning Source::Stop() is responsible for joining this worker.
 }
 
 AvPlayerSource::AVFramePtr AvPlayerSource::ConvertAudioFrame(const AVFrame& frame) {
@@ -851,7 +862,9 @@ void AvPlayerSource::AudioDecoderThread(std::stop_token stop) {
     LOG_INFO(Lib_AvPlayer, "Audio Decoder Thread started");
     while ((!m_is_eof || m_audio_packets.Size() != 0) && !stop.stop_requested()) {
         if (m_audio_packets.Size() == 0 &&
-            !m_audio_packets_cv.Wait(stop, [this] { return m_audio_packets.Size() != 0; })) {
+            !m_audio_packets_cv.Wait(stop, [this] {
+                return m_audio_packets.Size() != 0 || m_is_eof.load();
+            })) {
             continue;
         }
         const auto packet = m_audio_packets.Pop();
@@ -902,7 +915,7 @@ void AvPlayerSource::AudioDecoderThread(std::stop_token stop) {
     }
 
     LOG_INFO(Lib_AvPlayer, "Audio Decoder Thread exited normally");
-    m_audio_decoder_thread.Join();
+    // The owning Source::Stop() is responsible for joining this worker.
 }
 
 bool AvPlayerSource::HasRunningThreads() const {
