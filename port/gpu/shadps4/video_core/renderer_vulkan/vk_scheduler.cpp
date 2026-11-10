@@ -238,8 +238,23 @@ void Scheduler::KickRecording(bool force) {
     CheckOwner(__builtin_return_address(0));
     // Callers kick where nobody holds the raw command buffer: deferral resumes.
     direct_mode = false;
-    // Batches of tens of KiB keep the queue handoff cheap relative to the work it carries.
-    if (!force && full_chunks.empty() && record_chunk->Size() < 32 * 1024) {
+    // On CPUs with >=12 hardware threads (including the 7735U), larger batches
+    // amortize the recorder mutex, queue transfers, and worker wakeups across
+    // the thousands of Vulkan commands produced by crowded scenes.
+    // The 128 KiB command chunks still preserve order and all sync points
+    // force a flush. TLG_RECORD_BATCH_KB=32 restores the original behavior.
+    static const size_t batch_bytes = [] {
+        const size_t default_kib = TlgThreads::SizingCount() >= 12 ? 64 : 32;
+        if (const char* raw = std::getenv("TLG_RECORD_BATCH_KB"); raw && raw[0]) {
+            char* end = nullptr;
+            const unsigned long parsed = std::strtoul(raw, &end, 10);
+            if (end != raw && *end == '\0' && parsed >= 16 && parsed <= 96) {
+                return size_t(parsed) * 1024;
+            }
+        }
+        return default_kib * 1024;
+    }();
+    if (!force && full_chunks.empty() && record_chunk->Size() < batch_bytes) {
         return;
     }
     if (full_chunks.empty() && record_chunk->Empty()) {
