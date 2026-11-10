@@ -42,7 +42,9 @@ esac
 jitter=${TLG_JITTER:-$jitter}
 # A conservative 4 prep workers on 16 host threads; the Jirga benchmark showed
 # no universal gain from 4 vs 8, so allow explicit override.
-workers=${TLG_PREP_WORKERS:-4}
+default_workers=4
+if [[ "$mode" == native ]]; then default_workers=8; fi
+workers=${TLG_PREP_WORKERS:-$default_workers}
 if ! [[ "$workers" =~ ^([0-9]|1[0-6])$ ]]; then
   printf 'Invalid TLG_PREP_WORKERS=%s (expected 0..16)\n' "$workers" >&2
   exit 2
