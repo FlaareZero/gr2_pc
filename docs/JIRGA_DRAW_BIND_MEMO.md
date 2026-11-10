@@ -8,9 +8,9 @@ internal resolution, additional in-flight frames and CPU-side texture
 caches have not established an FPS gain: GPU-tick waits still dominate.
 Do not blindly remove draws, geometry, characters or GPU barriers.
 
-Each guest draw currently re-emits \`vkCmdBindPipeline\`, indexed draws
-re-emit \`vkCmdBindIndexBuffer\`, and on devices supporting dynamic vertex
-inputs the code re-emits \`vkCmdSetVertexInputEXT\`, even if the state is
+Each guest draw currently re-emits `vkCmdBindPipeline`, indexed draws
+re-emit `vkCmdBindIndexBuffer`, and on devices supporting dynamic vertex
+inputs the code re-emits `vkCmdSetVertexInputEXT`, even if the state is
 exactly the same as for the previous draw.
 
 This branch provides **opt-in Vulkan command reduction**: if the state
@@ -24,12 +24,12 @@ is the goal, NOT an outcome demonstrated by this patch.
 
 ## Safety: state lifetime and invalidation
 
-The memo is owned by \`Vulkan::Scheduler\` and updated on its serialized
+The memo is owned by `Vulkan::Scheduler` and updated on its serialized
 command-recording path, not in the guest-thread simulation.
 
 It invalidates:
 - on every freshly allocated primary command buffer;
-- whenever a raw \`Scheduler::CommandBuffer()\` is requested, because
+- whenever a raw `Scheduler::CommandBuffer()` is requested, because
   host passes may bind pipelines/index buffers without going through
   this optimization;
 - the dynamic-vertex-input memo whenever a **static vertex input**
@@ -59,10 +59,9 @@ With the game closed:
     cd ..
 
 This branch starts from **upstream main**, not the earlier speculative
-cache or recorder branches. The regular \`main\` build script may not
-honor \`TLG_BUILD_JOBS\` as this feature was introduced on a separate
-branch; if you need to constrain memory, invoke Ninja with limited jobs
-according to your local build setup. Ensure the build actually succeeds
+cache or recorder branches. This branch includes a small build-script
+change so `TLG_BUILD_JOBS=3` limits Ninja to three parallel compiler
+jobs; the default is unchanged. Ensure the build finishes successfully
 before running the new binary.
 
 ### Compare identical scenes
@@ -74,9 +73,9 @@ shader cache, 60-90 seconds each, preferably repeat A/B/A/B:
 
     TLG_DRAW_BIND_MEMO=1 TLG_DRAW_BIND_STATS=1 TLG_FRAME_STATS=1 ./run_gr2.sh 90 > "$HOME/jirga-bind-on.log" 2>&1
 
-The new \`Vulkan draw bind memo:\` report appears every ~5 seconds,
-showing \`gfx skipped S/N\`, \`index skipped S/N\`,
-\`vertex-input skipped S/N\`, and \`enabled=0/1\`.
+The new `Vulkan draw bind memo:` report appears every ~5 seconds,
+showing `gfx skipped S/N`, `index skipped S/N`,
+`vertex-input skipped S/N`, and `enabled=0/1`.
 On OFF runs all skips must be zero. On ON runs, a positive skip count
 confirms the new code actually suppressed redundant Vulkan commands;
 it is **not itself proof of an FPS gain**. Record heavy-scene FPS and
