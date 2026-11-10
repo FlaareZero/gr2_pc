@@ -65,3 +65,7 @@ source revision. Validate on the affected Fedora/RADV host, then verify
 Windows/Linux build checks and launcher, audio, input, saves and mods before
 calling any subsequent change a fix. No proprietary game or firmware data
 belongs in this repository.
+
+## Compare locally built and packaged executables
+
+See [the safe three-way Linux A/B experiment](BLACK_SCREEN_AB_EXPERIMENT.md). It rebuilds the stock C runtime using the same toolchain and GPU library as the working fork and separately checks the exact pinned official Linux release. The test is observational and does not establish a fix by itself.
