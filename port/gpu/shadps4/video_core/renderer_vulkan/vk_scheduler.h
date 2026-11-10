@@ -732,6 +732,9 @@ public:
     void BindGraphicsPipeline(vk::CommandBuffer cmdbuf, vk::Pipeline pipeline);
     void BindIndexBuffer(vk::CommandBuffer cmdbuf, vk::Buffer buffer, vk::DeviceSize offset,
                          vk::IndexType type);
+    void SetVertexInput(vk::CommandBuffer cmdbuf,
+                        std::span<const vk::VertexInputBindingDescription2EXT> bindings,
+                        std::span<const vk::VertexInputAttributeDescription2EXT> attributes);
 
     /// Returns the current command buffer for recording on the calling thread. With threaded
     /// recording this first waits until all commands passed to Record() are recorded, then
@@ -939,18 +942,24 @@ private:
     void InvalidateDrawBindings() noexcept {
         last_graphics_pipeline = {};
         index_binding_valid = false;
+        vertex_input_valid = false;
     }
     vk::Pipeline last_graphics_pipeline{};
     vk::Buffer last_index_buffer{};
     vk::DeviceSize last_index_offset{};
     vk::IndexType last_index_type{};
     bool index_binding_valid = false;
+    bool vertex_input_valid = false;
+    std::vector<vk::VertexInputBindingDescription2EXT> last_vertex_bindings;
+    std::vector<vk::VertexInputAttributeDescription2EXT> last_vertex_attributes;
     bool draw_bind_memo_enabled = false;
     bool draw_bind_stats_enabled = false;
     u64 draw_pipeline_binds = 0;
     u64 draw_pipeline_skips = 0;
     u64 draw_index_binds = 0;
     u64 draw_index_skips = 0;
+    u64 draw_vertex_input_calls = 0;
+    u64 draw_vertex_input_skips = 0;
     std::chrono::steady_clock::time_point last_draw_bind_report{};
     vk::CommandBuffer current_cmdbuf;
     std::condition_variable_any event_cv;
