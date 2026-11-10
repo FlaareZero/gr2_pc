@@ -56,6 +56,41 @@ Scheduler::~Scheduler() {
 #endif
 }
 
+void Scheduler::BindGraphicsPipeline(vk::CommandBuffer cmdbuf, vk::Pipeline pipeline) {
+    static const bool enabled = [] {
+        const char* e = std::getenv("TLG_GPU_BIND_DEDUP");
+        return e && e[0] == '1' && e[1] == '\0';
+    }();
+    if (enabled && cached_graphics_pipeline == pipeline) {
+        ++gpu_binds_skipped;
+        return;
+    }
+    cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline);
+    ++gpu_binds_issued;
+    if (enabled) cached_graphics_pipeline = pipeline;
+}
+
+void Scheduler::BindIndexBuffer(vk::CommandBuffer cmdbuf, vk::Buffer buffer,
+                                vk::DeviceSize offset, vk::IndexType type) {
+    static const bool enabled = [] {
+        const char* e = std::getenv("TLG_GPU_BIND_DEDUP");
+        return e && e[0] == '1' && e[1] == '\0';
+    }();
+    if (enabled && cached_index_valid && cached_index_buffer == buffer &&
+        cached_index_offset == offset && cached_index_type == type) {
+        ++gpu_binds_skipped;
+        return;
+    }
+    cmdbuf.bindIndexBuffer(buffer, offset, type);
+    ++gpu_binds_issued;
+    if (enabled) {
+        cached_index_buffer = buffer;
+        cached_index_offset = offset;
+        cached_index_type = type;
+        cached_index_valid = true;
+    }
+}
+
 void Scheduler::BeginRendering(const RenderState& new_state) {
     if (is_rendering && render_state == new_state) {
         return;
@@ -109,6 +144,7 @@ void Scheduler::BeginRendering(const RenderState& new_state) {
     };
 
     if (!recording_threaded) {
+        ResetGraphicsBindCache();
         current_cmdbuf.beginRendering(rendering_info);
         return;
     }
@@ -122,6 +158,7 @@ void Scheduler::BeginRendering(const RenderState& new_state) {
         if (info.pStencilAttachment) {
             info.pStencilAttachment = &stencil_attachment;
         }
+        ResetGraphicsBindCache();
         cmdbuf.beginRendering(info);
     });
 }
@@ -136,7 +173,10 @@ void Scheduler::EndRendering() {
         return;
     }
     is_rendering = false;
-    Record([](vk::CommandBuffer cmdbuf) { cmdbuf.endRendering(); });
+    Record([this](vk::CommandBuffer cmdbuf) {
+        cmdbuf.endRendering();
+        ResetGraphicsBindCache();
+    });
 }
 
 void Scheduler::TraceDirectRecording(void* caller) {
@@ -415,6 +455,7 @@ void Scheduler::AllocateWorkerCommandBuffers() {
     };
 
     current_cmdbuf = command_pool.Commit();
+    ResetGraphicsBindCache();
     Check(current_cmdbuf.begin(begin_info));
 
     // Invalidate dynamic state so it gets applied to the new command buffer.
@@ -452,6 +493,21 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
         profiler->Mark(0x5B317ull, [] { return std::string{"(between submissions: GPU idle)"}; });
     }
     SyncRecording();
+    // Sample only after the recording worker has finished all prior commands.
+    // The counters correspond to real Vulkan commands *not* emitted when the
+    // experiment is enabled, unlike a mere recorder-closure optimization.
+    static const bool report_gpu_binds = [] {
+        const char* e = std::getenv("TLG_GPU_BIND_DEDUP");
+        return e && e[0] == '1' && e[1] == '\0';
+    }();
+    if (report_gpu_binds && ++gpu_bind_log_submissions >= 256) {
+        std::printf("GPU bind dedup (256 submissions): emitted %llu, skipped %llu redundant "
+                    "pipeline/index binds\n",
+                    static_cast<unsigned long long>(gpu_binds_issued),
+                    static_cast<unsigned long long>(gpu_binds_skipped));
+        gpu_binds_issued = gpu_binds_skipped = 0;
+        gpu_bind_log_submissions = 0;
+    }
     // Guest memory copies into staging read by this submission (copy threads).
     WaitHostCopies();
     Check(current_cmdbuf.end());
