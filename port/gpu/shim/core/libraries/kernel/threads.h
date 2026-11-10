@@ -59,6 +59,21 @@ public:
         }
     }
     bool Joinable() const { return thread.joinable(); }
+
+    // A worker may need to wait for another worker to finish decoding at EOF.
+    // Do NOT call Join() from a worker: the player owner owns jthread join/detach,
+    // and concurrently calling Join() in Stop() caused EINVAL/double detaches.
+    // This waits only for the callback body; the owner still performs Stop().
+    void WaitForFinished() const {
+        const auto done = finished;
+        if (!done || thread.get_id() == std::this_thread::get_id()) {
+            return;
+        }
+        while (!done->load(std::memory_order_acquire)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    }
+
     /// tlg: asks the thread to stop without waiting (Stop() joins); callers that hold several
     /// threads ask them all first, wake what they wait on, then join.
     void RequestStop() {
