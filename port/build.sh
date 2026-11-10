@@ -77,7 +77,15 @@ cmake -S gpu -B out/gpu -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DTLG_PGO="$p
     -DTLG_LTO="${TLG_LTO:-ON}" -DTLG_PGO_DIR="$PWD/pgo" >/dev/null
 echo "GPU library: PGO $pgo, LTO ${TLG_LTO:-ON}"
 # A failed GPU build must stop here: an older libtlggpu.so would otherwise be used silently.
-if ! ninja -C out/gpu tlggpu > out/gpu-build.log 2>&1; then
+# Optional bound on parallel jobs for machines with shared GPU RAM (e.g. 16 GiB).
+ninja_jobs=()
+if [[ -n ${TLG_BUILD_JOBS:-} ]]; then
+    if [[ ! ${TLG_BUILD_JOBS} =~ ^[1-9][0-9]?$ ]]; then
+        echo 'TLG_BUILD_JOBS must be an integer 1..99' >&2; exit 1
+    fi
+    ninja_jobs=(-j "$TLG_BUILD_JOBS")
+fi
+if ! ninja -C out/gpu "${ninja_jobs[@]}" tlggpu > out/gpu-build.log 2>&1; then
     grep -v '^\[' out/gpu-build.log | tail -40 >&2
     echo 'GPU library build failed (full log: out/gpu-build.log)' >&2; exit 1
 fi
