@@ -65,6 +65,53 @@ scheduling; it may still freeze. Try it only after the normal A/B:
 Do not confuse the no-pipe profiling timings with ordinary gameplay FPS.
 Preserve any FREEZE report if the profiler still stalls.
 
+## Playable opt-in performance mode (no rebuild) — November 10, 2026
+
+**Concrete rendering-load reduction** for Radeon 680M on crowded Jirga scenes:
+the FSR 3.1 Vulkan reconstruction already in the game can present at 1080p
+while shading the 3D scene internally at a lower resolution. This changes
+actual GPU raster work but not the number of guest draw calls, animations,
+AI, NPC counts or save data.
+
+The new script works with the existing compiled binary and injects
+temporary environment overrides; it does not change permanent launcher
+settings or delete the shader cache.
+
+From the fork's root:
+
+    bash scripts/play_jirga_fast.sh quality
+
+The \`quality\` preset runs ~1280x720 internal scene pixels with FSR 3.1
+and 1080p output **if your configured output is 1920x1080**.
+First verify the game menu's output is 1920x1080.
+If performance is still poor, trade more image quality for speed:
+
+    bash scripts/play_jirga_fast.sh balanced
+    bash scripts/play_jirga_fast.sh performance
+
+- \`balanced\`: ~1130x636 internal scene.
+- \`performance\`: 960x540 internal scene.
+- \`native\`: upscaler off, original 1080p scene, comparison/reference.
+
+To confirm whether the render path actually changed, look for messages
+starting \`Upscaler: FSR 3.1 available (on)\`,
+\`Scene resolution: raster ...\`, and an FSR context size.
+
+This is a *testable performance workaround*, **not yet a verified FPS
+improvement**. At 6,000–7,000 draw calls/frame, reducing pixels can
+only shorten pixel/fragment/depth and related GPU costs. It does NOT
+remove draw submissions, and the upscaler has its own GPU cost. Its
+effectiveness will be measured from the heavy crowd scene before making
+it the default. FSR temporal reconstruction may show ghosting/shimmer
+on moving crowds because per-object motion is disabled in this game.
+If visuals are unstable, test \`TLG_JITTER=0\` or return to \`native\`.
+
+Compare the exact same save and camera viewpoint with F10 FPS overlay,
+using the benchmark logs if desired. A regular game launch with
+\`bash scripts/play_jirga_fast.sh quality\` needs no 100-second timeout.
+The script does not launch a background process, modify renderer files,
+or rewrite user saves. Gameplay itself may update saves normally.
+
 ## Procedure
 
 From the repository root, after fetching the performance branch, make
