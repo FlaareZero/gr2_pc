@@ -1168,6 +1168,7 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
 
     const vk::Pipeline handle = pipeline->Handle();
     const vk::Pipeline square = SquarePass(*pipeline);
+    const bool vertex_input_dynamic = instance.IsVertexInputDynamicState();
     const u32 num_indices = regs.num_indices;
     const u32 num_instances = regs.num_instances.NumInstances();
     const u32 first_vertex = vertex_offset;
@@ -1181,10 +1182,10 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
                 cmdbuf.draw(num_indices, num_instances, first_vertex, first_instance);
             }
         };
-        recorder->BindGraphicsPipeline(cmdbuf, handle);
+        recorder->BindGraphicsPipeline(cmdbuf, handle, vertex_input_dynamic);
         draw();
         if (square) [[unlikely]] {
-            recorder->BindGraphicsPipeline(cmdbuf, square);
+            recorder->BindGraphicsPipeline(cmdbuf, square, vertex_input_dynamic);
             draw();
         }
     });
@@ -1313,6 +1314,7 @@ void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_in
                                  : sizeof(VkDrawIndirectCommand)));
     const vk::Pipeline handle = pipeline->Handle();
     const vk::Pipeline square = SquarePass(*pipeline);
+    const bool vertex_input_dynamic = instance.IsVertexInputDynamicState();
     const vk::Buffer args = buffer->Handle();
     const u64 args_offset = base;
     const vk::Buffer counts = count_address != 0 ? count_buffer->Handle() : vk::Buffer{};
@@ -1322,7 +1324,7 @@ void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_in
             if (!bound) {
                 break;
             }
-            recorder->BindGraphicsPipeline(cmdbuf, bound);
+            recorder->BindGraphicsPipeline(cmdbuf, bound, vertex_input_dynamic);
             if (is_indexed) {
                 if (counts) {
                     cmdbuf.drawIndexedIndirectCount(args, args_offset, counts, counts_offset, max_count,
