@@ -1,6 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd -- "$(dirname -- "$0")"
+# Keep peak compile RAM below the shared-memory laptop budget when requested.
+# Default Ninja parallelism is unchanged when TLG_BUILD_JOBS is unset.
+ninja_jobs=()
+if [[ -n ${TLG_BUILD_JOBS:-} ]]; then
+    if [[ ! ${TLG_BUILD_JOBS} =~ ^[1-9][0-9]?$ ]]; then
+        echo 'TLG_BUILD_JOBS must be 1..99' >&2
+        exit 2
+    fi
+    ninja_jobs=(-j "$TLG_BUILD_JOBS")
+fi
 mkdir -p out
 # Windows: MSYS2 CLANG64 (packages in packaging/windows/README.md). The GPU library is static
 # there and CMake links tlg-probe.exe as well; no PGO (GCC-only flags), LTO off by default.
@@ -23,7 +33,7 @@ MINGW*|MSYS*)
     cmake -S gpu -B out/gpu -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DTLG_PGO=off \
         -DTLG_LTO="${TLG_LTO:-OFF}" -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ >/dev/null
     echo "GPU library and loader: LTO ${TLG_LTO:-OFF}"
-    if ! ninja -C out/gpu tlg-probe tlg-gpu-capabilities tlg-play > out/gpu-build.log 2>&1; then
+    if ! ninja -C out/gpu "${ninja_jobs[@]}" tlg-probe tlg-gpu-capabilities tlg-play > out/gpu-build.log 2>&1; then
         grep -v '^\[' out/gpu-build.log | tail -40 >&2
         echo 'Build failed (full log: out/gpu-build.log)' >&2; exit 1
     fi
@@ -77,7 +87,7 @@ cmake -S gpu -B out/gpu -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DTLG_PGO="$p
     -DTLG_LTO="${TLG_LTO:-ON}" -DTLG_PGO_DIR="$PWD/pgo" >/dev/null
 echo "GPU library: PGO $pgo, LTO ${TLG_LTO:-ON}"
 # A failed GPU build must stop here: an older libtlggpu.so would otherwise be used silently.
-if ! ninja -C out/gpu tlggpu > out/gpu-build.log 2>&1; then
+if ! ninja -C out/gpu "${ninja_jobs[@]}" tlggpu > out/gpu-build.log 2>&1; then
     grep -v '^\[' out/gpu-build.log | tail -40 >&2
     echo 'GPU library build failed (full log: out/gpu-build.log)' >&2; exit 1
 fi

@@ -1168,11 +1168,12 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
 
     const vk::Pipeline handle = pipeline->Handle();
     const vk::Pipeline square = SquarePass(*pipeline);
+    const bool vertex_input_dynamic = instance.IsVertexInputDynamicState();
     const u32 num_indices = regs.num_indices;
     const u32 num_instances = regs.num_instances.NumInstances();
     const u32 first_vertex = vertex_offset;
     const u32 first_instance = instance_offset;
-    scheduler.Record([=](vk::CommandBuffer cmdbuf) {
+    scheduler.Record([=, recorder = &scheduler](vk::CommandBuffer cmdbuf) {
         const auto draw = [&] {
             if (is_indexed) {
                 cmdbuf.drawIndexed(num_indices, num_instances, 0, s32(first_vertex),
@@ -1181,10 +1182,10 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
                 cmdbuf.draw(num_indices, num_instances, first_vertex, first_instance);
             }
         };
-        cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, handle);
+        recorder->BindGraphicsPipeline(cmdbuf, handle, vertex_input_dynamic);
         draw();
         if (square) [[unlikely]] {
-            cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, square);
+            recorder->BindGraphicsPipeline(cmdbuf, square, vertex_input_dynamic);
             draw();
         }
     });
@@ -1313,16 +1314,17 @@ void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_in
                                  : sizeof(VkDrawIndirectCommand)));
     const vk::Pipeline handle = pipeline->Handle();
     const vk::Pipeline square = SquarePass(*pipeline);
+    const bool vertex_input_dynamic = instance.IsVertexInputDynamicState();
     const vk::Buffer args = buffer->Handle();
     const u64 args_offset = base;
     const vk::Buffer counts = count_address != 0 ? count_buffer->Handle() : vk::Buffer{};
     const u64 counts_offset = count_address != 0 ? count_offset : 0;
-    scheduler.Record([=](vk::CommandBuffer cmdbuf) {
+    scheduler.Record([=, recorder = &scheduler](vk::CommandBuffer cmdbuf) {
         for (const vk::Pipeline bound : {handle, square}) {
             if (!bound) {
                 break;
             }
-            cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, bound);
+            recorder->BindGraphicsPipeline(cmdbuf, bound, vertex_input_dynamic);
             if (is_indexed) {
                 if (counts) {
                     cmdbuf.drawIndexedIndirectCount(args, args_offset, counts, counts_offset, max_count,
@@ -1756,9 +1758,9 @@ void Rasterizer::EmitVertexBuffers() {
     if (dynamic_input) {
         scheduler.Record([bindings = scheduler.RecordData(std::span<const vk::VertexInputBindingDescription2EXT>{v.bindings.data(), v.bindings.size()}),
                           attributes = scheduler.RecordData(std::span<const vk::VertexInputAttributeDescription2EXT>{
-                              v.attributes.data(), v.attributes.size()})](
-                             vk::CommandBuffer cmdbuf) {
-            cmdbuf.setVertexInputEXT(bindings, attributes);
+                              v.attributes.data(), v.attributes.size()}),
+                          recorder = &scheduler](vk::CommandBuffer cmdbuf) {
+            recorder->SetVertexInput(cmdbuf, bindings, attributes);
         });
     }
     if (num_buffers == 0) {
@@ -1925,8 +1927,8 @@ void Rasterizer::BindIndexBuffer(u32 index_offset) {
 
 void Rasterizer::EmitIndexBuffer() {
     scheduler.Record([handle = index_bind.handle, offset = index_bind.offset,
-                      type = index_bind.type](vk::CommandBuffer cmdbuf) {
-        cmdbuf.bindIndexBuffer(handle, offset, type);
+                      type = index_bind.type, recorder = &scheduler](vk::CommandBuffer cmdbuf) {
+        recorder->BindIndexBuffer(cmdbuf, handle, offset, type);
     });
 }
 

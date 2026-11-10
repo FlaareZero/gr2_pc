@@ -29,6 +29,15 @@ std::mutex Scheduler::submit_mutex;
 
 Scheduler::Scheduler(const Instance& instance, bool threaded_recording)
     : instance{instance}, work_semaphore{instance}, command_pool{instance, &work_semaphore} {
+    // Opt-in until visual correctness and frame pacing are measured on RADV.
+    // Skips only byte-identical binding state, never a draw, shader or barrier.
+    if (const char* value = std::getenv("TLG_DRAW_BIND_MEMO")) {
+        draw_bind_memo_enabled = value[0] == '1';
+    }
+    if (const char* value = std::getenv("TLG_DRAW_BIND_STATS")) {
+        draw_bind_stats_enabled = value[0] == '1';
+    }
+    last_draw_bind_report = std::chrono::steady_clock::now();
     // tlg: TLG_VK_RECORD_THREAD=0 records on the calling thread.
     const char* env = std::getenv("TLG_VK_RECORD_THREAD");
     if (threaded_recording && !(env && env[0] == '0')) {
@@ -42,6 +51,76 @@ Scheduler::Scheduler(const Instance& instance, bool threaded_recording)
     AllocateWorkerCommandBuffers();
     priority_pending_ops_thread =
         std::jthread(std::bind_front(&Scheduler::PriorityPendingOpsThread, this));
+}
+
+void Scheduler::BindGraphicsPipeline(vk::CommandBuffer cmdbuf, vk::Pipeline pipeline,
+                                     bool vertex_input_dynamic) {
+    if (draw_bind_stats_enabled) {
+        ++draw_pipeline_binds;
+    }
+    if (draw_bind_memo_enabled && last_graphics_pipeline == pipeline) {
+        if (draw_bind_stats_enabled) ++draw_pipeline_skips;
+        return;
+    }
+    // Vulkan invalidates a dynamic state's prior values when binding a
+    // graphics pipeline which specifies it as static. The host depth resample
+    // pass uses static vertex inputs; guest pipelines use dynamic inputs on
+    // supported hardware. Skip a later vkCmdSetVertexInputEXT only when the
+    // last static-state bind has not invalidated it.
+    if (!vertex_input_dynamic) {
+        vertex_input_valid = false;
+    }
+    cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline);
+    last_graphics_pipeline = pipeline;
+}
+
+void Scheduler::BindIndexBuffer(vk::CommandBuffer cmdbuf, vk::Buffer buffer,
+                                vk::DeviceSize offset, vk::IndexType type) {
+    if (draw_bind_stats_enabled) {
+        ++draw_index_binds;
+    }
+    if (draw_bind_memo_enabled && index_binding_valid && last_index_buffer == buffer &&
+        last_index_offset == offset && last_index_type == type) {
+        if (draw_bind_stats_enabled) ++draw_index_skips;
+        return;
+    }
+    cmdbuf.bindIndexBuffer(buffer, offset, type);
+    last_index_buffer = buffer;
+    last_index_offset = offset;
+    last_index_type = type;
+    index_binding_valid = true;
+}
+
+void Scheduler::SetVertexInput(
+    vk::CommandBuffer cmdbuf,
+    std::span<const vk::VertexInputBindingDescription2EXT> bindings,
+    std::span<const vk::VertexInputAttributeDescription2EXT> attributes) {
+    if (draw_bind_stats_enabled) ++draw_vertex_input_calls;
+    const auto same_binding = [](const auto& a, const auto& b) {
+        return a.sType == b.sType && a.pNext == b.pNext &&
+               a.binding == b.binding && a.stride == b.stride &&
+               a.inputRate == b.inputRate && a.divisor == b.divisor;
+    };
+    const auto same_attribute = [](const auto& a, const auto& b) {
+        return a.sType == b.sType && a.pNext == b.pNext &&
+               a.location == b.location && a.binding == b.binding &&
+               a.format == b.format && a.offset == b.offset;
+    };
+    if (draw_bind_memo_enabled && vertex_input_valid &&
+        bindings.size() == last_vertex_bindings.size() &&
+        attributes.size() == last_vertex_attributes.size() &&
+        std::equal(bindings.begin(), bindings.end(), last_vertex_bindings.begin(), same_binding) &&
+        std::equal(attributes.begin(), attributes.end(), last_vertex_attributes.begin(),
+                   same_attribute)) {
+        if (draw_bind_stats_enabled) ++draw_vertex_input_skips;
+        return;
+    }
+    cmdbuf.setVertexInputEXT(bindings, attributes);
+    if (draw_bind_memo_enabled) {
+        last_vertex_bindings.assign(bindings.begin(), bindings.end());
+        last_vertex_attributes.assign(attributes.begin(), attributes.end());
+        vertex_input_valid = true;
+    }
 }
 
 Scheduler::~Scheduler() {
@@ -400,6 +479,7 @@ void Scheduler::AllocateWorkerCommandBuffers() {
     };
 
     current_cmdbuf = command_pool.Commit();
+    InvalidateDrawBindings();
     Check(current_cmdbuf.begin(begin_info));
 
     // Invalidate dynamic state so it gets applied to the new command buffer.
@@ -437,6 +517,27 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
         profiler->Mark(0x5B317ull, [] { return std::string{"(between submissions: GPU idle)"}; });
     }
     SyncRecording();
+    // Recorder is quiescent here: reading/resetting its counters is race-free.
+    if (draw_bind_stats_enabled) {
+        const auto now = std::chrono::steady_clock::now();
+        if (now - last_draw_bind_report >= std::chrono::seconds(5)) {
+            std::fprintf(stderr,
+                         "Vulkan draw bind memo: gfx skipped %llu/%llu, "
+                         "index skipped %llu/%llu, vertex-input skipped %llu/%llu, "
+                         "enabled=%d\n",
+                         static_cast<unsigned long long>(draw_pipeline_skips),
+                         static_cast<unsigned long long>(draw_pipeline_binds),
+                         static_cast<unsigned long long>(draw_index_skips),
+                         static_cast<unsigned long long>(draw_index_binds),
+                         static_cast<unsigned long long>(draw_vertex_input_skips),
+                         static_cast<unsigned long long>(draw_vertex_input_calls),
+                         static_cast<int>(draw_bind_memo_enabled));
+            draw_pipeline_skips = draw_pipeline_binds = 0;
+            draw_index_skips = draw_index_binds = 0;
+            draw_vertex_input_skips = draw_vertex_input_calls = 0;
+            last_draw_bind_report = now;
+        }
+    }
     // Guest memory copies into staging read by this submission (copy threads).
     WaitHostCopies();
     Check(current_cmdbuf.end());
